@@ -4,5 +4,23 @@
       "name": "v1.16.0",
       "rev": "8987040ede9553cea20c95ad40d0455930f9c8e0"
     }
+  },
+  "lib/openzeppelin-contracts": {
+    "tag": {
+      "name": "v4.9.0",
+      "rev": "54b3f14346da01ba0d159114b399197fea8b7cda"
+    }
+  },
+  "lib/openzeppelin-contracts-upgradeable": {
+    "tag": {
+      "name": "v4.9.0",
+      "rev": "f6febd79e2a3a17e26969dd0d450c6ebd64bf459"
+    }
+  },
+  "lib/v2-core": {
+    "tag": {
+      "name": "v1.0.1",
+      "rev": "4dd59067c76dea4a0e8e4bfdda41877a6b16dedc"
+    }
   }
 }
