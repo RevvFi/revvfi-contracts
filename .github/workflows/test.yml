@@ -29,7 +29,8 @@ jobs:
 
       - name: Format check (non-blocking)
         run: forge fmt --check || echo "⚠️ Formatting issues found. Run 'forge fmt' locally."
-
+      - name: Install dependencies
+        run: forge install
       - name: Build
         run: forge build --sizes
 
