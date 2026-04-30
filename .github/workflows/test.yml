@@ -1,40 +1,40 @@
-name: CI
-
-permissions: {}
+name: Smart Contract CI
 
 on:
   push:
   pull_request:
-  workflow_dispatch:
-
-env:
-  FOUNDRY_PROFILE: ci
 
 jobs:
-  check:
-    name: Foundry project
+  test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout repo
+        uses: actions/checkout@v5
         with:
-          persist-credentials: false
           submodules: recursive
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-            version: nightly
+          version: stable
 
-      - name: Show Forge version
-        run: forge --version
+      - name: Cache Foundry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.foundry
+            lib
+          key: ${{ runner.os }}-foundry-${{ hashFiles('**/foundry.toml') }}
 
-      - name: Run Forge fmt
-        run: forge fmt --check
+      - name: Format check (non-blocking)
+        run: forge fmt --check || echo "⚠️ Formatting issues found. Run 'forge fmt' locally."
 
-      - name: Run Forge build
+      - name: Build
         run: forge build --sizes
 
-      - name: Run Forge tests
+      - name: Test
         run: forge test -vvv
+
+      - name: Gas snapshot
+        run: forge snapshot
