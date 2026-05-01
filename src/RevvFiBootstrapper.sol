@@ -4,7 +4,6 @@ pragma solidity 0.8.33;
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -13,30 +12,72 @@ import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 
+// Fix import paths - these should exist in ./interfaces/ directory
 import "./interfaces/IRevvFiGovernance.sol";
 import "./interfaces/ICreatorVestingVault.sol";
 import "./interfaces/ITreasuryVault.sol";
 import "./interfaces/IStrategicReserveVault.sol";
 import "./interfaces/IRewardsDistributor.sol";
+import "./interfaces/IRevvFiFactory.sol";
+import "./interfaces/ICentralAuthority.sol";
 
+/**
+ * @title RevvFiBootstrapper
+ * @notice Core contract per launch. Holds ETH, tracks LP shares, creates Uniswap pool.
+ * @dev IMMUTABLE AFTER DEPLOYMENT - all critical addresses set in initialize and cannot change
+ */
 contract RevvFiBootstrapper is
     Initializable,
     ReentrancyGuardUpgradeable,
-    PausableUpgradeable,
-    OwnableUpgradeable
+    PausableUpgradeable
 {
     using SafeERC20 for IERC20;
+
+    // =============================================================
+    // Custom Errors
+    // =============================================================
+
+    error ZeroAddress();
+    error ZeroDeposit();
+    error HardCapExceeded();
+    error TargetNotMet();
+    error AlreadyLaunched();
+    error AlreadyFailed();
+    error RaiseNotEnded();
+    error NotFailed();
+    error RefundAlreadyClaimed();
+    error NoShares();
+    error RefundFailed();
+    error WithdrawLocked();
+    error InvalidShareAmount();
+    error LiquidityAddFailed();
+    error PairNotFound();
+    error UnauthorizedCaller();
+    error VaultAlreadySet();
+    error InsufficientETHForLiquidity();
+    error KeeperRewardFailed();
+    error VestingInitFailed();
+    error RewardsInitFailed();
 
     // =============================================================
     // Constants
     // =============================================================
 
     uint256 public constant PRECISION = 1e18;
-    uint256 public constant MIN_LOCK_DURATION = 30 days;
-    uint256 public constant MAX_LOCK_DURATION = 730 days;
+    uint256 public constant DEADLINE_BUFFER = 300; // 5 minutes
 
     // =============================================================
-    // Core Config
+    // Role Constants (for Central Authority)
+    // =============================================================
+    
+    bytes32 public constant DAO_ROLE = keccak256("DAO_ROLE");
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+    bytes32 public constant OPS_ROLE = keccak256("OPS_ROLE");
+    bytes32 public constant FACTORY_ROLE = keccak256("FACTORY_ROLE");
+    bytes32 public constant BOOTSTRAPPER_ROLE = keccak256("BOOTSTRAPPER_ROLE");
+
+    // =============================================================
+    // Immutable Core Config (Set Once in Initialize)
     // =============================================================
 
     address public creator;
@@ -44,9 +85,12 @@ contract RevvFiBootstrapper is
     address public weth;
     address public uniswapRouter;
     address public platformFeeRecipient;
+    address public factory;
+    address public centralAuthority;
+    uint256 public launchId;
 
     // =============================================================
-    // Token Allocation
+    // Immutable Token Allocations
     // =============================================================
 
     uint256 public liquidityAllocation;
@@ -56,7 +100,7 @@ contract RevvFiBootstrapper is
     uint256 public rewardsAmount;
 
     // =============================================================
-    // Timings
+    // Immutable Timings
     // =============================================================
 
     uint256 public raiseEndTime;
@@ -65,16 +109,15 @@ contract RevvFiBootstrapper is
     uint256 public creatorVestingDuration;
 
     // =============================================================
-    // Raise Targets
+    // Immutable Raise Targets
     // =============================================================
 
     uint256 public targetLiquidityETH;
     uint256 public hardCapETH;
-
     uint256 public keeperReward;
 
     // =============================================================
-    // Modules
+    // Immutable Vault Addresses
     // =============================================================
 
     address public creatorVestingVault;
@@ -84,30 +127,22 @@ contract RevvFiBootstrapper is
     address public governanceModule;
 
     // =============================================================
-    // LP Shares
+    // Mutable State
     // =============================================================
 
     mapping(address => uint256) public shares;
     uint256 public totalShares;
     uint256 public totalDepositedETH;
 
-    // =============================================================
-    // Status
-    // =============================================================
-
     bool public launched;
     bool public failed;
-
     mapping(address => bool) public refundClaimed;
-
-    // =============================================================
-    // LP Tokens
-    // =============================================================
 
     address public uniswapPair;
     uint256 public uniLPTokenAmount;
-
     uint256 public maturityTime;
+
+    bool public rewardsInitialized;
 
     // =============================================================
     // Events
@@ -118,7 +153,8 @@ contract RevvFiBootstrapper is
         uint256 totalETH,
         uint256 lpMinted,
         address pair,
-        uint256 maturityTime
+        uint256 maturityTime,
+        address indexed caller
     );
     event Refunded(address indexed user, uint256 amount);
     event AssetsWithdrawn(
@@ -127,30 +163,61 @@ contract RevvFiBootstrapper is
         uint256 ethOut,
         uint256 tokenOut
     );
-
-    event CreatorVestingVaultSet(address vault);
-    event TreasuryVaultSet(address vault);
-    event StrategicReserveVaultSet(address vault);
-    event RewardsDistributorSet(address distributor);
-    event GovernanceModuleSet(address governance);
+    event KeeperRewardPaid(address indexed keeper, uint256 amount);
+    event RewardsDistributorInitialized(address indexed distributor, uint256 startTime, uint256 endTime);
 
     // =============================================================
-    // Modifiers
+    // Role Check Modifiers (Using Central Authority)
     // =============================================================
+    
+    modifier onlyDAO() {
+        if (!ICentralAuthority(centralAuthority).hasRole(DAO_ROLE, msg.sender)) {
+            revert UnauthorizedCaller();
+        }
+        _;
+    }
+    
+    modifier onlyGuardian() {
+        if (!ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+            revert UnauthorizedCaller();
+        }
+        _;
+    }
+    
+    modifier onlyFactory() {
+        if (!ICentralAuthority(centralAuthority).hasRole(FACTORY_ROLE, msg.sender)) {
+            revert UnauthorizedCaller();
+        }
+        _;
+    }
+
+    modifier onlyCreator() {
+        if (msg.sender != creator) revert UnauthorizedCaller();
+        _;
+    }
 
     modifier onlyLaunchPhase() {
-        require(!launched && !failed, "not launch phase");
-        require(block.timestamp <= raiseEndTime, "raise ended");
+        if (launched) revert AlreadyLaunched();
+        if (failed) revert AlreadyFailed();
+        if (block.timestamp > raiseEndTime) revert RaiseNotEnded();
         _;
     }
 
     modifier afterLaunch() {
-        require(launched, "not launched");
+        if (!launched) revert AlreadyLaunched();
         _;
     }
 
     // =============================================================
-    // Initializer
+    // Constructor
+    // =============================================================
+
+    constructor() {
+        _disableInitializers();
+    }
+
+    // =============================================================
+    // Initialize (Called by Factory via CREATE2)
     // =============================================================
 
     function initialize(
@@ -170,29 +237,39 @@ contract RevvFiBootstrapper is
         uint256 _creatorCliffDuration,
         uint256 _creatorVestingDuration,
         address _platformFeeRecipient,
-        uint256 _keeperReward
+        uint256 _keeperReward,
+        address _creatorVestingVault,
+        address _treasuryVault,
+        address _strategicReserveVault,
+        address _rewardsDistributor,
+        address _governanceModule,
+        uint256 _launchId,
+        address _centralAuthority
     ) external initializer {
-        __Ownable_init();
-        __Pausable_init();
         __ReentrancyGuard_init();
+        __Pausable_init();
 
-        require(_creator != address(0), "zero creator");
-        require(_revvToken != address(0), "zero token");
-        require(_weth != address(0), "zero weth");
-        require(_uniswapRouter != address(0), "zero router");
-        require(_platformFeeRecipient != address(0), "zero fee recipient");
-
-        require(
-            _lockDuration >= MIN_LOCK_DURATION &&
-                _lockDuration <= MAX_LOCK_DURATION,
-            "bad lock"
-        );
+        if (_creator == address(0)) revert ZeroAddress();
+        if (_revvToken == address(0)) revert ZeroAddress();
+        if (_weth == address(0)) revert ZeroAddress();
+        if (_uniswapRouter == address(0)) revert ZeroAddress();
+        if (_platformFeeRecipient == address(0)) revert ZeroAddress();
+        if (_creatorVestingVault == address(0)) revert ZeroAddress();
+        if (_treasuryVault == address(0)) revert ZeroAddress();
+        if (_strategicReserveVault == address(0)) revert ZeroAddress();
+        if (_rewardsDistributor == address(0)) revert ZeroAddress();
+        if (_governanceModule == address(0)) revert ZeroAddress();
+        if (_launchId == 0) revert ZeroAddress();
+        if (_centralAuthority == address(0)) revert ZeroAddress();
 
         creator = _creator;
         revvToken = _revvToken;
         weth = _weth;
         uniswapRouter = _uniswapRouter;
         platformFeeRecipient = _platformFeeRecipient;
+        factory = msg.sender;
+        launchId = _launchId;
+        centralAuthority = _centralAuthority;
 
         liquidityAllocation = _liquidityAllocation;
         creatorVestingAmount = _creatorVestingAmount;
@@ -202,53 +279,35 @@ contract RevvFiBootstrapper is
 
         targetLiquidityETH = _targetLiquidityETH;
         hardCapETH = _hardCapETH;
-
         raiseEndTime = block.timestamp + _raiseWindowDuration;
         lockDuration = _lockDuration;
+        keeperReward = _keeperReward;
 
         creatorCliffDuration = _creatorCliffDuration;
         creatorVestingDuration = _creatorVestingDuration;
 
-        keeperReward = _keeperReward;
+        creatorVestingVault = _creatorVestingVault;
+        treasuryVault = _treasuryVault;
+        strategicReserveVault = _strategicReserveVault;
+        rewardsDistributor = _rewardsDistributor;
+        governanceModule = _governanceModule;
 
-        _transferOwnership(_creator);
+        rewardsInitialized = false;
 
-        IERC20(revvToken).approve(uniswapRouter, type(uint256).max);
-        IERC20(weth).approve(uniswapRouter, type(uint256).max);
+        _safeApprove(revvToken, uniswapRouter, type(uint256).max);
+        _safeApprove(weth, uniswapRouter, type(uint256).max);
+        
+        // Register this bootstrapper with Central Authority
+        ICentralAuthority(centralAuthority).authorizeContract(address(this), BOOTSTRAPPER_ROLE);
     }
 
     // =============================================================
-    // Module Wiring (Owner = Creator)
+    // Safe Approval Helper
     // =============================================================
 
-    function setCreatorVestingVault(address vault) external onlyOwner {
-        require(vault != address(0), "zero addr");
-        creatorVestingVault = vault;
-        emit CreatorVestingVaultSet(vault);
-    }
-
-    function setTreasuryVault(address vault) external onlyOwner {
-        require(vault != address(0), "zero addr");
-        treasuryVault = vault;
-        emit TreasuryVaultSet(vault);
-    }
-
-    function setStrategicReserveVault(address vault) external onlyOwner {
-        require(vault != address(0), "zero addr");
-        strategicReserveVault = vault;
-        emit StrategicReserveVaultSet(vault);
-    }
-
-    function setRewardsDistributor(address distributor) external onlyOwner {
-        require(distributor != address(0), "zero addr");
-        rewardsDistributor = distributor;
-        emit RewardsDistributorSet(distributor);
-    }
-
-    function setGovernanceModule(address governance) external onlyOwner {
-        require(governance != address(0), "zero addr");
-        governanceModule = governance;
-        emit GovernanceModuleSet(governance);
+    function _safeApprove(address token, address spender, uint256 amount) internal {
+        IERC20(token).approve(spender, 0);
+        IERC20(token).approve(spender, amount);
     }
 
     // =============================================================
@@ -262,13 +321,10 @@ contract RevvFiBootstrapper is
         whenNotPaused
         onlyLaunchPhase
     {
-        require(msg.value > 0, "zero deposit");
+        if (msg.value == 0) revert ZeroDeposit();
 
         if (hardCapETH > 0) {
-            require(
-                totalDepositedETH + msg.value <= hardCapETH,
-                "hardcap exceeded"
-            );
+            if (totalDepositedETH + msg.value > hardCapETH) revert HardCapExceeded();
         }
 
         shares[msg.sender] += msg.value;
@@ -279,88 +335,77 @@ contract RevvFiBootstrapper is
     }
 
     // =============================================================
-    // Launch
+    // Launch - Permissionless
     // =============================================================
 
     function launch() external nonReentrant onlyLaunchPhase {
-        require(totalDepositedETH >= targetLiquidityETH, "target not met");
+        if (totalDepositedETH < targetLiquidityETH) revert TargetNotMet();
+
+        uint256 ethForLiquidity = totalDepositedETH;
+        if (keeperReward > 0) {
+            if (totalDepositedETH <= keeperReward) revert InsufficientETHForLiquidity();
+            ethForLiquidity = totalDepositedETH - keeperReward;
+        }
 
         maturityTime = raiseEndTime + lockDuration;
 
         _transferToVaults();
-        _addLiquidity();
+        _initializeVestingVault();
+        _initializeRewardsDistributor();
+        _addLiquidityWithAmount(ethForLiquidity);
 
         launched = true;
+
+        if (keeperReward > 0) {
+            (bool sent, ) = msg.sender.call{value: keeperReward}("");
+            if (!sent) revert KeeperRewardFailed();
+            emit KeeperRewardPaid(msg.sender, keeperReward);
+        }
+
+        _notifyFactorySuccess();
 
         emit LaunchExecuted(
             totalDepositedETH,
             uniLPTokenAmount,
             uniswapPair,
-            maturityTime
+            maturityTime,
+            msg.sender
         );
     }
 
     // =============================================================
-    // Fail Raise + Refunds
+    // Mark Failed & Refunds
     // =============================================================
 
-    function markFailed() external onlyLaunchPhase {
-        require(block.timestamp > raiseEndTime, "raise active");
-        require(totalDepositedETH < targetLiquidityETH, "target met");
+    function markFailed() external nonReentrant onlyLaunchPhase {
+        if (block.timestamp <= raiseEndTime) revert RaiseNotEnded();
+        if (totalDepositedETH >= targetLiquidityETH) revert TargetNotMet();
+        if (failed) revert AlreadyFailed();
 
         failed = true;
+        _notifyFactoryFailure();
     }
 
     function claimRefund() external nonReentrant {
-        require(failed, "not failed");
-        require(!refundClaimed[msg.sender], "claimed");
+        if (!failed) revert NotFailed();
+        if (refundClaimed[msg.sender]) revert RefundAlreadyClaimed();
 
         uint256 amount = shares[msg.sender];
-        require(amount > 0, "no shares");
+        if (amount == 0) revert NoShares();
 
         refundClaimed[msg.sender] = true;
         shares[msg.sender] = 0;
+        totalShares -= amount;
+        totalDepositedETH -= amount;
 
         (bool ok, ) = msg.sender.call{value: amount}("");
-        require(ok, "refund failed");
+        if (!ok) revert RefundFailed();
 
         emit Refunded(msg.sender, amount);
     }
 
     // =============================================================
-    // Internal: Add Liquidity
-    // =============================================================
-
-    function _addLiquidity() internal {
-        IUniswapV2Router02 router = IUniswapV2Router02(uniswapRouter);
-
-        (, , uint256 liquidity) = router.addLiquidityETH{
-            value: totalDepositedETH
-        }(
-            revvToken,
-            liquidityAllocation,
-            0,
-            0,
-            address(this),
-            block.timestamp + 300
-        );
-
-        uniLPTokenAmount = liquidity;
-
-        address factory = router.factory();
-
-        address pair = IUniswapV2Factory(factory).getPair(
-            revvToken,
-            weth
-        );
-
-        require(pair != address(0), "pair not created");
-
-        uniswapPair = pair;
-    }
-
-    // =============================================================
-    // Withdraw LP Assets After Lock
+    // Withdrawals After Maturity
     // =============================================================
 
     function withdrawAsAssets(uint256 shareAmount)
@@ -369,11 +414,10 @@ contract RevvFiBootstrapper is
         afterLaunch
         whenNotPaused
     {
-        require(block.timestamp >= maturityTime, "locked");
-        require(
-            shareAmount > 0 && shareAmount <= shares[msg.sender],
-            "bad amount"
-        );
+        if (block.timestamp < maturityTime) revert WithdrawLocked();
+        if (shareAmount == 0 || shareAmount > shares[msg.sender]) revert InvalidShareAmount();
+
+        if (totalShares == 0) revert InvalidShareAmount();
 
         uint256 fraction = (shareAmount * PRECISION) / totalShares;
         uint256 lpToRemove = (fraction * uniLPTokenAmount) / PRECISION;
@@ -385,118 +429,193 @@ contract RevvFiBootstrapper is
         uniLPTokenAmount -= lpToRemove;
 
         if (governanceModule != address(0)) {
-            IRevvFiGovernance(governanceModule).onSharesUpdated(
+            try IRevvFiGovernance(governanceModule).onSharesUpdated(
                 msg.sender,
                 shares[msg.sender]
-            );
+            ) {} catch {}
         }
 
         if (ethOut > 0) {
             (bool ok, ) = msg.sender.call{value: ethOut}("");
-            require(ok, "eth failed");
+            if (!ok) revert RefundFailed();
         }
 
         if (tokenOut > 0) {
             IERC20(revvToken).safeTransfer(msg.sender, tokenOut);
         }
 
-        emit AssetsWithdrawn(
-            msg.sender,
-            shareAmount,
-            ethOut,
-            tokenOut
-        );
+        emit AssetsWithdrawn(msg.sender, shareAmount, ethOut, tokenOut);
     }
 
     // =============================================================
-    // Remove Liquidity
+    // Emergency Token Rescue (DAO only after maturity)
     // =============================================================
+
+    function rescueTokens(address token, uint256 amount, address recipient) external onlyDAO {
+        if (block.timestamp < maturityTime) revert WithdrawLocked();
+        if (recipient == address(0)) revert ZeroAddress();
+        
+        if (token == revvToken) {
+            uint256 lockedAmount = IERC20(revvToken).balanceOf(address(this));
+            if (amount > lockedAmount) revert InvalidShareAmount();
+        }
+        
+        IERC20(token).safeTransfer(recipient, amount);
+    }
+
+    // =============================================================
+    // Internal Functions
+    // =============================================================
+
+    function _addLiquidityWithAmount(uint256 ethAmount) internal {
+        IUniswapV2Router02 router = IUniswapV2Router02(uniswapRouter);
+
+        (, , uint256 liquidity) = router.addLiquidityETH{value: ethAmount}(
+            revvToken,
+            liquidityAllocation,
+            0,
+            0,
+            address(this),
+            block.timestamp + DEADLINE_BUFFER
+        );
+
+        if (liquidity == 0) revert LiquidityAddFailed();
+        uniLPTokenAmount = liquidity;
+
+        address factoryAddr = router.factory();
+        address pair = IUniswapV2Factory(factoryAddr).getPair(revvToken, weth);
+
+        if (pair == address(0)) revert PairNotFound();
+        uniswapPair = pair;
+    }
 
     function _removeLiquidity(uint256 lpAmount)
         internal
         returns (uint256 ethOut, uint256 tokenOut)
     {
-        require(uniswapPair != address(0), "pair not set");
+        if (uniswapPair == address(0)) revert PairNotFound();
 
         IERC20(uniswapPair).approve(uniswapRouter, lpAmount);
 
-        (tokenOut, ethOut) = IUniswapV2Router02(uniswapRouter)
-            .removeLiquidityETH(
-                revvToken,
-                lpAmount,
-                0,
-                0,
-                address(this),
-                block.timestamp + 300
-            );
+        (tokenOut, ethOut) = IUniswapV2Router02(uniswapRouter).removeLiquidityETH(
+            revvToken,
+            lpAmount,
+            0,
+            0,
+            address(this),
+            block.timestamp + DEADLINE_BUFFER
+        );
     }
-
-    // =============================================================
-    // Transfer Reserved Allocations
-    // =============================================================
 
     function _transferToVaults() internal {
         IERC20 token = IERC20(revvToken);
-
-        if (
-            creatorVestingAmount > 0 &&
-            creatorVestingVault != address(0)
-        ) {
-            token.safeTransfer(
-                creatorVestingVault,
-                creatorVestingAmount
-            );
-        }
 
         if (treasuryAmount > 0 && treasuryVault != address(0)) {
             token.safeTransfer(treasuryVault, treasuryAmount);
         }
 
-        if (
-            strategicReserveAmount > 0 &&
-            strategicReserveVault != address(0)
-        ) {
-            token.safeTransfer(
-                strategicReserveVault,
-                strategicReserveAmount
-            );
+        if (strategicReserveAmount > 0 && strategicReserveVault != address(0)) {
+            token.safeTransfer(strategicReserveVault, strategicReserveAmount);
         }
 
-        if (
-            rewardsAmount > 0 &&
-            rewardsDistributor != address(0)
-        ) {
-            token.safeTransfer(
-                rewardsDistributor,
+        if (rewardsAmount > 0 && rewardsDistributor != address(0)) {
+            token.safeTransfer(rewardsDistributor, rewardsAmount);
+        }
+
+        if (creatorVestingAmount > 0 && creatorVestingVault != address(0)) {
+            token.safeTransfer(creatorVestingVault, creatorVestingAmount);
+        }
+    }
+
+    function _initializeVestingVault() internal {
+        if (creatorVestingAmount > 0 && creatorVestingVault != address(0)) {
+            try ICreatorVestingVault(creatorVestingVault).initializeVesting(
+                revvToken,
+                creator,
+                creatorVestingAmount,
+                creatorCliffDuration,
+                creatorVestingDuration,
+                block.timestamp
+            ) returns (bool success) {
+                if (!success) revert VestingInitFailed();
+            } catch {
+                revert VestingInitFailed();
+            }
+        }
+    }
+
+    function _initializeRewardsDistributor() internal {
+        if (rewardsAmount > 0 && rewardsDistributor != address(0) && !rewardsInitialized) {
+            uint256 startTime = block.timestamp + lockDuration;
+            uint256 endTime = startTime + creatorVestingDuration;
+            
+            try IRewardsDistributor(rewardsDistributor).initializeSchedule(
+                startTime,
+                endTime,
                 rewardsAmount
-            );
+            ) {
+                rewardsInitialized = true;
+                emit RewardsDistributorInitialized(rewardsDistributor, startTime, endTime);
+                
+                if (factory != address(0)) {
+                    try IRevvFiFactory(factory).updateLaunchRewardsInitialized(launchId) {} catch {}
+                }
+            } catch {
+                revert RewardsInitFailed();
+            }
+        }
+    }
+
+    function _notifyFactorySuccess() internal {
+        if (factory != address(0)) {
+            try IRevvFiFactory(factory).updateLaunchSuccess(launchId, maturityTime) {} catch {}
+        }
+    }
+
+    function _notifyFactoryFailure() internal {
+        if (factory != address(0)) {
+            try IRevvFiFactory(factory).updateLaunchFailure(launchId) {} catch {}
         }
     }
 
     // =============================================================
-    // Guardian / Creator Controls
+    // Guardian Controls (via Factory)
     // =============================================================
 
-    function emergencyPause() external onlyOwner {
+    function emergencyPause() external onlyFactory {
         _pause();
     }
 
-    function emergencyUnpause() external onlyOwner {
+    function emergencyUnpause() external onlyFactory {
         _unpause();
     }
 
     // =============================================================
-    // Views
+    // View Functions
     // =============================================================
 
-    function getShareValueBps(
-        address user
-    ) external view returns (uint256) {
+    function getShareValueBps(address user) external view returns (uint256) {
         if (totalShares == 0) return 0;
         return (shares[user] * 10000) / totalShares;
     }
 
+    function getVotingPower(address lp) external view returns (uint256) {
+        return shares[lp];
+    }
+
+    function getLaunchId() external view returns (uint256) {
+        return launchId;
+    }
+
+    // =============================================================
+    // Receive ETH
+    // =============================================================
+
     receive() external payable {}
 
-    uint256[50] private __gap;
+    // =============================================================
+    // Storage Gap for Upgrades
+    // =============================================================
+
+    uint256[47] private __gap;
 }

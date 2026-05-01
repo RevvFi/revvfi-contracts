@@ -7,7 +7,15 @@ interface IPopularityOracle {
         uint256 score
     ) external;
 
-    function calculateScore(
-        address bootstrapper
-    ) external view returns (uint256);
+    function calculateScore(address bootstrapper) external view returns (uint256);
+    function getScoreDetails(address bootstrapper) external view returns (
+        uint256 score,
+        uint256 lastUpdateTime,
+        uint256 depositVelocity,
+        uint256 uniqueDepositors,
+        uint256 socialScore,
+        uint256 creatorReputation,
+        uint256 timeToTargetScore
+    );
+
 }

@@ -3,36 +3,75 @@ pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/Create2Upgradeable.sol";
 
 import "./interfaces/ITokenTemplateFactory.sol";
 import "./interfaces/IPopularityOracle.sol";
-import "./interfaces/IRevvFiBootstrapper.sol";
+import "./interfaces/ICreatorProfileRegistry.sol";
+import "./interfaces/ICentralAuthority.sol";
+import "./RevvFiBootstrapper.sol";
+import "./CreatorVestingVault.sol";
+import "./TreasuryVault.sol";
+import "./StrategicReserveVault.sol";
+import "./RewardDistributor.sol";
+import "./RevvFiGovernance.sol";
 
 /**
  * @title RevvFiFactory
- * @notice Transparent Proxy compatible version
+ * @notice Deploys complete launch ecosystems with all vaults
+ * @dev Non-upgradeable implementation for vaults, factory uses Transparent Proxy pattern with UUPS upgradeability
  */
-contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgradeable {
+contract RevvFiFactory is 
+    Initializable, 
+    AccessControlUpgradeable, 
+    PausableUpgradeable, 
+    ReentrancyGuardUpgradeable 
+{
     // =============================================================
-    // Roles
+    // Custom Errors
     // =============================================================
 
+    error ZeroAddress();
+    error InvalidFee();
+    error FeeTransferFailed();
+    error SupplyMismatch();
+    error InvalidRaiseWindow();
+    error InvalidLockDuration();
+    error InvalidCliffDuration();
+    error ZeroTargetLiquidity();
+    error HardCapLessThanTarget();
+    error ZeroLiquidityAllocation();
+    error LaunchFailed();
+    error BootstrapperNotFound();
+    error InvalidTemplateId();
+    error DeploymentFailed();
+    error Create2Failed();
+    error InvalidTokenName();
+    error InvalidTokenSymbol();
+    error LaunchIdNotFound();
+
+    // =============================================================
+    // Roles (Delegated to Central Authority)
+    // =============================================================
+
+    bytes32 public constant DAO_ROLE = keccak256("DAO_ROLE");
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+    bytes32 public constant OPS_ROLE = keccak256("OPS_ROLE");
+    bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+    bytes32 public constant FACTORY_ROLE = keccak256("FACTORY_ROLE");
 
     // =============================================================
-    // Constants
+    // Constants (Updatable via governance)
     // =============================================================
 
-    uint256 public constant LAUNCH_FEE = 0.1 ether;
-    uint256 public constant KEEPER_REWARD = 0.01 ether;
-
-    uint256 public constant MIN_LOCK_DURATION = 30 days;
-    uint256 public constant MAX_LOCK_DURATION = 730 days;
-
-    uint256 public constant MIN_RAISE_WINDOW = 7 days;
-    uint256 public constant MAX_RAISE_WINDOW = 90 days;
+    uint256 public launchFee;
+    uint256 public keeperReward;
+    uint256 public minLockDuration;
+    uint256 public maxLockDuration;
+    uint256 public minRaiseWindow;
+    uint256 public maxRaiseWindow;
 
     // =============================================================
     // Structs
@@ -53,21 +92,19 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         uint256 lockDuration;
         uint256 creatorCliffDuration;
         uint256 creatorVestingDuration;
-        uint8 templateId;
+        bytes32 templateId;
         string tokenURI;
     }
 
     struct LaunchMetadata {
         uint256 launchId;
         address creator;
+        address bootstrapper;
         uint256 createdAt;
-        bool active;
         uint256 targetLiquidityETH;
-        uint256 totalDepositedETH;
         uint256 raiseEndTime;
         uint256 maturityTime;
-        bool launched;
-        bool failed;
+        uint8 status;
     }
 
     // =============================================================
@@ -75,17 +112,24 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
     // =============================================================
 
     uint256 public bootstrapperCount;
-
-    mapping(uint256 => address) public bootstrappers;
+    mapping(uint256 => LaunchMetadata) public launches;
     mapping(address => bool) public isDeployed;
-    mapping(address => LaunchMetadata) public launchMetadata;
+    mapping(address => uint256) public creatorNonce;
 
+    // External contracts
     address public tokenTemplateFactory;
     address public uniswapRouter;
     address public weth;
     address public platformFeeRecipient;
     address public creatorRegistry;
     address public popularityOracle;
+    address public centralAuthority;
+
+    // Status constants
+    uint8 public constant STATUS_PENDING = 0;
+    uint8 public constant STATUS_LAUNCHED = 1;
+    uint8 public constant STATUS_FAILED = 2;
+    uint8 public constant STATUS_COMPLETED = 3;
 
     // =============================================================
     // Events
@@ -99,14 +143,20 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         uint256 raiseEndTime
     );
 
-    event LaunchPaused(address indexed bootstrapper, address indexed executor);
-
+    event LaunchSucceeded(uint256 indexed launchId, address indexed bootstrapper, uint256 maturityTime);
+    event LaunchFailed(uint256 indexed launchId, address indexed bootstrapper);
+    event LaunchMetadataUpdated(uint256 indexed launchId, string field, uint256 value);
+    
     event FeeRecipientUpdated(address indexed newRecipient);
     event UniswapRouterUpdated(address indexed newRouter);
     event WETHUpdated(address indexed newWeth);
     event TokenTemplateFactoryUpdated(address indexed newFactory);
     event CreatorRegistryUpdated(address indexed newRegistry);
     event PopularityOracleUpdated(address indexed newOracle);
+    event CentralAuthorityUpdated(address indexed newAuthority);
+    
+    event FeesUpdated(uint256 newLaunchFee, uint256 newKeeperReward);
+    event DurationBoundsUpdated(uint256 minLock, uint256 maxLock, uint256 minRaise, uint256 maxRaise);
 
     // =============================================================
     // Constructor
@@ -126,18 +176,28 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         address _weth,
         address _platformFeeRecipient,
         address _creatorRegistry,
-        address _popularityOracle
+        address _popularityOracle,
+        address _centralAuthority
     ) external initializer {
         __AccessControl_init();
         __Pausable_init();
+        __ReentrancyGuard_init();
 
+        if (_tokenTemplateFactory == address(0)) revert ZeroAddress();
+        if (_uniswapRouter == address(0)) revert ZeroAddress();
+        if (_weth == address(0)) revert ZeroAddress();
+        if (_platformFeeRecipient == address(0)) revert ZeroAddress();
+        if (_centralAuthority == address(0)) revert ZeroAddress();
+
+        // Delegate role checks to Central Authority
+        centralAuthority = _centralAuthority;
+        
+        // Grant self roles for initialization
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(DAO_ROLE, msg.sender);
         _grantRole(GUARDIAN_ROLE, msg.sender);
-
-        require(_tokenTemplateFactory != address(0), "invalid token factory");
-        require(_uniswapRouter != address(0), "invalid router");
-        require(_weth != address(0), "invalid weth");
-        require(_platformFeeRecipient != address(0), "invalid fee recipient");
+        _grantRole(OPS_ROLE, msg.sender);
+        _grantRole(UPGRADER_ROLE, msg.sender);
 
         tokenTemplateFactory = _tokenTemplateFactory;
         uniswapRouter = _uniswapRouter;
@@ -145,6 +205,49 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         platformFeeRecipient = _platformFeeRecipient;
         creatorRegistry = _creatorRegistry;
         popularityOracle = _popularityOracle;
+
+        // Initialize configurable constants
+        launchFee = 0.1 ether;
+        keeperReward = 0.01 ether;
+        minLockDuration = 30 days;
+        maxLockDuration = 730 days;
+        minRaiseWindow = 7 days;
+        maxRaiseWindow = 90 days;
+        
+        // Register factory with Central Authority
+        ICentralAuthority(centralAuthority).setFactory(address(this));
+    }
+
+    // =============================================================
+    // Role Check Modifiers (Using Central Authority)
+    // =============================================================
+    
+    modifier onlyDAO() {
+        if (!ICentralAuthority(centralAuthority).hasRole(DAO_ROLE, msg.sender)) {
+            revert UnauthorizedCaller();
+        }
+        _;
+    }
+    
+    modifier onlyGuardian() {
+        if (!ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+            revert UnauthorizedCaller();
+        }
+        _;
+    }
+    
+    modifier onlyOps() {
+        if (!ICentralAuthority(centralAuthority).hasRole(OPS_ROLE, msg.sender)) {
+            revert UnauthorizedCaller();
+        }
+        _;
+    }
+    
+    modifier onlyUpgrader() {
+        if (!ICentralAuthority(centralAuthority).hasRole(UPGRADER_ROLE, msg.sender)) {
+            revert UnauthorizedCaller();
+        }
+        _;
     }
 
     // =============================================================
@@ -153,27 +256,21 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
 
     function createLaunch(
         LaunchConfig calldata config
-    ) external payable whenNotPaused returns (address bootstrapper) {
-        require(msg.value == LAUNCH_FEE, "invalid fee");
-
+    ) external nonReentrant whenNotPaused returns (address bootstrapperAddr) {
+        if (msg.value != launchFee) revert InvalidFee();
+        
         _validateLaunchConfig(config);
+        _validateTokenNameSymbol(config.tokenName, config.tokenSymbol);
 
-        (bool sent, ) = platformFeeRecipient.call{value: LAUNCH_FEE}("");
-        require(sent, "fee transfer failed");
-
+        uint256 nonce = creatorNonce[msg.sender];
         bytes32 salt = keccak256(
-            abi.encodePacked(
-                config.tokenName,
-                config.tokenSymbol,
-                config.totalSupply,
-                block.timestamp,
-                msg.sender
-            )
+            abi.encodePacked(msg.sender, nonce, config.tokenSymbol)
         );
+        creatorNonce[msg.sender] = nonce + 1;
 
         address predictedBootstrapper = Create2Upgradeable.computeAddress(
             salt,
-            keccak256(type(IRevvFiBootstrapper).creationCode)
+            keccak256(type(RevvFiBootstrapper).creationCode)
         );
 
         address token = ITokenTemplateFactory(tokenTemplateFactory).deployToken(
@@ -184,52 +281,87 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
             predictedBootstrapper
         );
 
-        bytes memory bytecode = abi.encodePacked(
-            type(IRevvFiBootstrapper).creationCode,
-            abi.encode(
-                msg.sender,
-                token,
-                weth,
-                uniswapRouter,
-                config.liquidityAllocation,
-                config.targetLiquidityETH,
-                config.hardCapETH,
-                config.raiseWindowDuration,
-                config.lockDuration,
-                config.creatorVestingAmount,
-                config.treasuryAmount,
-                config.strategicReserveAmount,
-                config.rewardsAmount,
-                config.creatorCliffDuration,
-                config.creatorVestingDuration,
-                platformFeeRecipient,
-                KEEPER_REWARD
-            )
+        if (token == address(0)) revert DeploymentFailed();
+
+        address creatorVestingVault = _deployCreatorVestingVault();
+        address treasuryVault = _deployTreasuryVault(token);
+        address strategicReserveVault = _deployStrategicReserveVault(token);
+        address rewardsDistributor = _deployRewardsDistributor(token);
+        
+        address governanceModule = _deployGovernanceModule(
+            predictedBootstrapper,
+            treasuryVault,
+            strategicReserveVault,
+            msg.sender
         );
 
-        bootstrapper = Create2Upgradeable.deploy(0, salt, bytecode);
+        bytes memory bytecode = type(RevvFiBootstrapper).creationCode;
+        bootstrapperAddr = Create2Upgradeable.deploy(0, salt, bytecode);
+        
+        if (bootstrapperAddr != predictedBootstrapper) revert Create2Failed();
+        if (bootstrapperAddr == address(0)) revert DeploymentFailed();
 
         bootstrapperCount++;
-
-        bootstrappers[bootstrapperCount] = bootstrapper;
-        isDeployed[bootstrapper] = true;
-
-        launchMetadata[bootstrapper] = LaunchMetadata({
-            launchId: bootstrapperCount,
+        uint256 launchId = bootstrapperCount;
+        
+        launches[launchId] = LaunchMetadata({
+            launchId: launchId,
             creator: msg.sender,
+            bootstrapper: bootstrapperAddr,
             createdAt: block.timestamp,
-            active: true,
             targetLiquidityETH: config.targetLiquidityETH,
-            totalDepositedETH: 0,
             raiseEndTime: block.timestamp + config.raiseWindowDuration,
             maturityTime: 0,
-            launched: false,
-            failed: false
+            status: STATUS_PENDING
         });
 
+        isDeployed[bootstrapperAddr] = true;
+
+        RevvFiBootstrapper(bootstrapperAddr).initialize(
+            msg.sender,
+            token,
+            weth,
+            uniswapRouter,
+            config.liquidityAllocation,
+            config.targetLiquidityETH,
+            config.hardCapETH,
+            config.raiseWindowDuration,
+            config.lockDuration,
+            config.creatorVestingAmount,
+            config.treasuryAmount,
+            config.strategicReserveAmount,
+            config.rewardsAmount,
+            config.creatorCliffDuration,
+            config.creatorVestingDuration,
+            platformFeeRecipient,
+            keeperReward,
+            creatorVestingVault,
+            treasuryVault,
+            strategicReserveVault,
+            rewardsDistributor,
+            governanceModule,
+            launchId,
+            centralAuthority
+        );
+
+        ITreasuryVault(treasuryVault).initializeGovernance(governanceModule);
+        IStrategicReserveVault(strategicReserveVault).initializeGovernance(governanceModule);
+        
+        (bool sent, ) = platformFeeRecipient.call{value: launchFee}("");
+        if (!sent) revert FeeTransferFailed();
+
+        if (creatorRegistry != address(0)) {
+            try ICreatorProfileRegistry(creatorRegistry).recordLaunch(
+                msg.sender,
+                launchId,
+                bootstrapperAddr,
+                config.targetLiquidityETH
+            ) {} catch {}
+        }
+
         emit LaunchCreated(
-            bootstrapperCount,
-            bootstrapper,
+            launchId,
+            bootstrapperAddr,
             msg.sender,
             config.targetLiquidityETH,
             block.timestamp + config.raiseWindowDuration
@@ -237,135 +369,226 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
     }
 
     // =============================================================
+    // Internal Deployment Helpers
+    // =============================================================
+
+    function _deployCreatorVestingVault() internal returns (address) {
+        return address(new CreatorVestingVault(address(this), platformFeeRecipient));
+    }
+
+    function _deployTreasuryVault(address token) internal returns (address) {
+        return address(new TreasuryVault(token, address(this), platformFeeRecipient));
+    }
+
+    function _deployStrategicReserveVault(address token) internal returns (address) {
+        return address(new StrategicReserveVault(token, address(this), platformFeeRecipient));
+    }
+
+    function _deployRewardsDistributor(address token) internal returns (address) {
+        return address(new RewardsDistributor(token, address(this), platformFeeRecipient));
+    }
+
+    function _deployGovernanceModule(
+        address bootstrapper,
+        address treasuryVault,
+        address strategicReserveVault,
+        address creator
+    ) internal returns (address) {
+        return address(new RevvFiGovernance(
+            bootstrapper,
+            treasuryVault,
+            strategicReserveVault,
+            creator,
+            address(this),
+            centralAuthority
+        ));
+    }
+
+    // =============================================================
+    // Launch Status Updates (Called by Bootstrapper)
+    // =============================================================
+
+    function updateLaunchSuccess(uint256 launchId, uint256 maturityTime) external {
+        if (launches[launchId].bootstrapper != msg.sender) revert BootstrapperNotFound();
+        
+        launches[launchId].maturityTime = maturityTime;
+        launches[launchId].status = STATUS_LAUNCHED;
+        
+        emit LaunchSucceeded(launchId, msg.sender, maturityTime);
+    }
+
+    function updateLaunchFailure(uint256 launchId) external {
+        if (launches[launchId].bootstrapper != msg.sender) revert BootstrapperNotFound();
+        
+        launches[launchId].status = STATUS_FAILED;
+        
+        emit LaunchFailed(launchId, msg.sender);
+    }
+
+    function updateLaunchRewardsInitialized(uint256 launchId) external {
+        if (launches[launchId].bootstrapper != msg.sender) revert BootstrapperNotFound();
+    }
+
+    // =============================================================
     // Views
     // =============================================================
 
-    function getLaunch(
-        uint256 launchId
-    ) external view returns (LaunchMetadata memory) {
-        address bootstrapper = bootstrappers[launchId];
-        require(bootstrapper != address(0), "invalid id");
-        return launchMetadata[bootstrapper];
+    function getLaunch(uint256 launchId) external view returns (LaunchMetadata memory) {
+        if (launches[launchId].bootstrapper == address(0)) revert BootstrapperNotFound();
+        return launches[launchId];
     }
 
-    function getBootstrapperAddress(
-        uint256 launchId
-    ) external view returns (address) {
-        return bootstrappers[launchId];
+    function getBootstrapperAddress(uint256 launchId) external view returns (address) {
+        return launches[launchId].bootstrapper;
+    }
+
+    function getLiveLaunchStatus(address bootstrapper) external view returns (
+        uint256 totalDepositedETH,
+        uint256 totalShares,
+        bool launched,
+        bool failed,
+        uint256 maturityTime
+    ) {
+        if (!isDeployed[bootstrapper]) revert BootstrapperNotFound();
+        
+        IRevvFiBootstrapper b = IRevvFiBootstrapper(bootstrapper);
+        return (
+            b.totalDepositedETH(),
+            b.totalShares(),
+            b.launched(),
+            b.failed(),
+            b.maturityTime()
+        );
     }
 
     // =============================================================
-    // Guardian
+    // Guardian Functions
     // =============================================================
 
-    function pauseLaunch(address bootstrapper) external onlyRole(GUARDIAN_ROLE) {
-        require(isDeployed[bootstrapper], "invalid bootstrapper");
-
+    function pauseLaunch(address bootstrapper) external onlyGuardian {
+        if (!isDeployed[bootstrapper]) revert BootstrapperNotFound();
         IRevvFiBootstrapper(bootstrapper).emergencyPause();
-
-        emit LaunchPaused(bootstrapper, msg.sender);
     }
 
-    function pause() external onlyRole(GUARDIAN_ROLE) {
+    function pause() external onlyGuardian {
         _pause();
     }
 
-    function unpause() external onlyRole(GUARDIAN_ROLE) {
+    function unpause() external onlyGuardian {
         _unpause();
     }
 
     // =============================================================
-    // Admin Config
+    // Admin Config (DAO and OPS roles via Central Authority)
     // =============================================================
 
-    function setPlatformFeeRecipient(
-        address newRecipient
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newRecipient != address(0), "zero addr");
+    function setPlatformFeeRecipient(address newRecipient) external onlyDAO {
+        if (newRecipient == address(0)) revert ZeroAddress();
         platformFeeRecipient = newRecipient;
         emit FeeRecipientUpdated(newRecipient);
     }
 
-    function setUniswapRouter(
-        address newRouter
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newRouter != address(0), "zero addr");
+    function setUniswapRouter(address newRouter) external onlyOps {
+        if (newRouter == address(0)) revert ZeroAddress();
         uniswapRouter = newRouter;
         emit UniswapRouterUpdated(newRouter);
     }
 
-    function setWETH(
-        address newWeth
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newWeth != address(0), "zero addr");
+    function setWETH(address newWeth) external onlyOps {
+        if (newWeth == address(0)) revert ZeroAddress();
         weth = newWeth;
         emit WETHUpdated(newWeth);
     }
 
-    function setTokenTemplateFactory(
-        address newFactory
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newFactory != address(0), "zero addr");
+    function setTokenTemplateFactory(address newFactory) external onlyDAO {
+        if (newFactory == address(0)) revert ZeroAddress();
         tokenTemplateFactory = newFactory;
         emit TokenTemplateFactoryUpdated(newFactory);
     }
 
-    function setCreatorRegistry(
-        address newRegistry
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setCreatorRegistry(address newRegistry) external onlyOps {
         creatorRegistry = newRegistry;
         emit CreatorRegistryUpdated(newRegistry);
     }
 
-    function setPopularityOracle(
-        address newOracle
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setPopularityOracle(address newOracle) external onlyOps {
         popularityOracle = newOracle;
         emit PopularityOracleUpdated(newOracle);
+    }
+
+    function setCentralAuthority(address newAuthority) external onlyDAO {
+        if (newAuthority == address(0)) revert ZeroAddress();
+        centralAuthority = newAuthority;
+        emit CentralAuthorityUpdated(newAuthority);
+    }
+
+    function setFees(uint256 newLaunchFee, uint256 newKeeperReward) external onlyDAO {
+        launchFee = newLaunchFee;
+        keeperReward = newKeeperReward;
+        emit FeesUpdated(newLaunchFee, newKeeperReward);
+    }
+
+    function setDurationBounds(
+        uint256 newMinLock,
+        uint256 newMaxLock,
+        uint256 newMinRaise,
+        uint256 newMaxRaise
+    ) external onlyDAO {
+        if (newMinLock > newMaxLock) revert InvalidLockDuration();
+        if (newMinRaise > newMaxRaise) revert InvalidRaiseWindow();
+        
+        minLockDuration = newMinLock;
+        maxLockDuration = newMaxLock;
+        minRaiseWindow = newMinRaise;
+        maxRaiseWindow = newMaxRaise;
+        
+        emit DurationBoundsUpdated(newMinLock, newMaxLock, newMinRaise, newMaxRaise);
     }
 
     // =============================================================
     // Internal Validation
     // =============================================================
 
-    function _validateLaunchConfig(
-        LaunchConfig calldata config
-    ) internal pure {
-        uint256 totalAllocated =
-            config.liquidityAllocation +
+    function _validateLaunchConfig(LaunchConfig calldata config) internal view {
+        uint256 totalAllocated = config.liquidityAllocation +
             config.creatorVestingAmount +
             config.treasuryAmount +
             config.strategicReserveAmount +
             config.rewardsAmount;
 
-        require(totalAllocated == config.totalSupply, "supply mismatch");
+        if (totalAllocated != config.totalSupply) revert SupplyMismatch();
 
-        require(
-            config.raiseWindowDuration >= MIN_RAISE_WINDOW &&
-            config.raiseWindowDuration <= MAX_RAISE_WINDOW,
-            "bad raise window"
-        );
-
-        require(
-            config.lockDuration >= MIN_LOCK_DURATION &&
-            config.lockDuration <= MAX_LOCK_DURATION,
-            "bad lock duration"
-        );
-
-        require(
-            config.creatorCliffDuration <= config.creatorVestingDuration,
-            "cliff > vesting"
-        );
-
-        require(config.targetLiquidityETH > 0, "zero target");
-
-        if (config.hardCapETH > 0) {
-            require(
-                config.hardCapETH >= config.targetLiquidityETH,
-                "hardcap < target"
-            );
+        if (config.raiseWindowDuration < minRaiseWindow || config.raiseWindowDuration > maxRaiseWindow) {
+            revert InvalidRaiseWindow();
         }
 
-        require(config.liquidityAllocation > 0, "zero liquidity");
+        if (config.lockDuration < minLockDuration || config.lockDuration > maxLockDuration) {
+            revert InvalidLockDuration();
+        }
+
+        if (config.creatorCliffDuration > config.creatorVestingDuration) {
+            revert InvalidCliffDuration();
+        }
+
+        if (config.targetLiquidityETH == 0) revert ZeroTargetLiquidity();
+
+        if (config.hardCapETH > 0 && config.hardCapETH < config.targetLiquidityETH) {
+            revert HardCapLessThanTarget();
+        }
+
+        if (config.liquidityAllocation == 0) revert ZeroLiquidityAllocation();
     }
+
+    function _validateTokenNameSymbol(string memory name, string memory symbol) internal pure {
+        if (bytes(name).length == 0 || bytes(name).length > 32) revert InvalidTokenName();
+        if (bytes(symbol).length == 0 || bytes(symbol).length > 10) revert InvalidTokenSymbol();
+    }
+
+    // =============================================================
+    // Storage Gap for Upgrades
+    // =============================================================
+    
+    uint256[49] private __gap;
+    
+    error UnauthorizedCaller();
 }
