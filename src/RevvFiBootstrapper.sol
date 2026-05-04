@@ -528,21 +528,21 @@ contract RevvFiBootstrapper is
     }
 
     function _initializeVestingVault() internal {
-        if (creatorVestingAmount > 0 && creatorVestingVault != address(0)) {
-            try ICreatorVestingVault(creatorVestingVault).initializeVesting(
-                revvToken,
-                creator,
-                creatorVestingAmount,
-                creatorCliffDuration,
-                creatorVestingDuration,
-                block.timestamp
-            ) returns (bool success) {
-                if (!success) revert VestingInitFailed();
-            } catch {
-                revert VestingInitFailed();
-            }
+    if (creatorVestingAmount > 0 && creatorVestingVault != address(0)) {
+        try ICreatorVestingVault(creatorVestingVault).initializeVesting(
+            revvToken,
+            creator,
+            creatorVestingAmount,
+            creatorCliffDuration,
+            creatorVestingDuration,
+            block.timestamp
+        ) {
+            // success
+        } catch {
+            revert VestingInitFailed();
         }
     }
+}
 
     function _initializeRewardsDistributor() internal {
         if (rewardsAmount > 0 && rewardsDistributor != address(0) && !rewardsInitialized) {
