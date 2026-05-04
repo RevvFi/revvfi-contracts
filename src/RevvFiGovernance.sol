@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IRevvFiBootstrapper.sol";
 import "./interfaces/ITreasuryVault.sol";
 import "./interfaces/IStrategicReserveVault.sol";
+import "./interfaces/ICentralAuthority.sol";
 
 /**
  * @title RevvFiGovernance
@@ -52,9 +53,9 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     struct Proposal {
         uint256 id;
         address proposer;
-        address target; // Contract to call (TreasuryVault, etc.)
-        bytes callData; // Changed from 'calldata' to 'callData' (reserved keyword)
-        uint8 proposalType; // 0=Treasury, 1=Strategic, 2=LockReduction, 3=Emergency
+        address target;
+        bytes callData;
+        uint8 proposalType;
         uint256 startTime;
         uint256 endTime;
         uint256 forVotes;
@@ -81,6 +82,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     address public immutable strategicReserveVault;
     address public immutable creator;
     address public immutable factory;
+    address public immutable centralAuthority;
 
     // Proposal tracking
     uint256 public proposalCounter;
@@ -115,13 +117,9 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     );
 
     event VoteCast(uint256 indexed proposalId, address indexed voter, bool support, uint256 votingPower);
-
     event ProposalExecuted(uint256 indexed proposalId, address indexed executor);
-
     event ProposalCancelled(uint256 indexed proposalId, address indexed canceller);
-
     event ProposalVetoed(uint256 indexed proposalId, address indexed creator);
-
     event EmergencyPaused(address indexed executor);
     event EmergencyUnpaused(address indexed executor);
 
@@ -168,24 +166,26 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         address _treasuryVault,
         address _strategicReserveVault,
         address _creator,
-        address _factory
+        address _factory,
+        address _centralAuthority
     ) {
         require(_bootstrapper != address(0), "RevvFiGovernance: zero bootstrapper");
         require(_treasuryVault != address(0), "RevvFiGovernance: zero treasury vault");
         require(_strategicReserveVault != address(0), "RevvFiGovernance: zero strategic reserve");
         require(_creator != address(0), "RevvFiGovernance: zero creator");
         require(_factory != address(0), "RevvFiGovernance: zero factory");
+        require(_centralAuthority != address(0), "RevvFiGovernance: zero central authority");
 
         bootstrapper = _bootstrapper;
         treasuryVault = _treasuryVault;
         strategicReserveVault = _strategicReserveVault;
         creator = _creator;
         factory = _factory;
+        centralAuthority = _centralAuthority;
 
         emergencyPaused = false;
         proposalCounter = 0;
 
-        // Setup roles
         _grantRole(DEFAULT_ADMIN_ROLE, _factory);
         _grantRole(GUARDIAN_ROLE, _factory);
         _grantRole(EXECUTOR_ROLE, _factory);
@@ -195,13 +195,6 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     // Proposal Management
     // =============================================================
 
-    /**
-     * @dev Creates a new proposal
-     * @param target Contract to call
-     * @param callData Encoded function call
-     * @param proposalType Type of proposal (0-3)
-     * @param description Human-readable description
-     */
     function propose(address target, bytes calldata callData, uint8 proposalType, string calldata description)
         external
         whenNotPaused
@@ -211,18 +204,15 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         require(bytes(description).length > 0, "RevvFiGovernance: empty description");
         require(proposalType <= 3, "RevvFiGovernance: invalid proposal type");
 
-        // Validate target matches proposal type
         if (proposalType == PROPOSAL_TYPE_TREASURY) {
             require(target == treasuryVault, "RevvFiGovernance: target must be treasury vault");
         } else if (proposalType == PROPOSAL_TYPE_STRATEGIC) {
             require(target == strategicReserveVault, "RevvFiGovernance: target must be strategic reserve");
         }
 
-        // Get proposer's voting power
         uint256 votingPower = IRevvFiBootstrapper(bootstrapper).shares(msg.sender);
         uint256 totalShares = IRevvFiBootstrapper(bootstrapper).totalShares();
 
-        // Check minimum proposal threshold (1% of total shares)
         uint256 minThreshold = (totalShares * MIN_PROPOSAL_THRESHOLD_BPS) / BASIS_POINTS;
         require(votingPower >= minThreshold, "RevvFiGovernance: insufficient voting power to propose");
 
@@ -258,12 +248,6 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         return proposalCounter;
     }
 
-    // The rest of the contract remains the same...
-    // (keep all other functions unchanged from your original)
-
-    /**
-     * @dev Casts a vote on a proposal
-     */
     function castVote(uint256 proposalId, bool support) external whenNotPaused proposalExists(proposalId) {
         Proposal storage proposal = proposals[proposalId];
 
@@ -284,13 +268,11 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         }
 
         emit VoteCast(proposalId, msg.sender, support, votingPower);
-
         _checkAndFinalizeProposal(proposalId);
     }
 
     function _checkAndFinalizeProposal(uint256 proposalId) internal {
         Proposal storage proposal = proposals[proposalId];
-
         if (block.timestamp > proposal.endTime) {
             _finalizeProposal(proposalId);
         }
@@ -298,24 +280,17 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
     function _finalizeProposal(uint256 proposalId) internal {
         Proposal storage proposal = proposals[proposalId];
-
-        if (proposal.state != PROPOSAL_STATE_ACTIVE) {
-            return;
-        }
+        if (proposal.state != PROPOSAL_STATE_ACTIVE) return;
 
         uint256 totalVotes = proposal.forVotes + proposal.againstVotes;
         uint256 threshold = _getApprovalThreshold(proposal.proposalType);
         uint256 quorum = _getQuorumThreshold(proposal.proposalType);
-
         uint256 quorumRequired = (proposal.totalVotingPowerAtStart * quorum) / BASIS_POINTS;
 
         bool passed = false;
-
         if (totalVotes >= quorumRequired && totalVotes > 0) {
             uint256 approvalPercentage = (proposal.forVotes * BASIS_POINTS) / totalVotes;
-            if (approvalPercentage >= threshold) {
-                passed = true;
-            }
+            if (approvalPercentage >= threshold) passed = true;
         }
 
         if (passed) {
@@ -335,10 +310,6 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         require(!creatorVetoed[proposalId], "RevvFiGovernance: proposal vetoed");
         require(block.timestamp >= proposalTimelock[proposalId], "RevvFiGovernance: timelock active");
 
-        if (proposal.proposalType == PROPOSAL_TYPE_LOCK_REDUCTION) {
-            require(creatorVetoed[proposalId] == false, "RevvFiGovernance: creator vetoed");
-        }
-
         proposal.executed = true;
         proposal.state = PROPOSAL_STATE_EXECUTED;
 
@@ -350,22 +321,17 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
     function cancelProposal(uint256 proposalId) external proposalExists(proposalId) {
         Proposal storage proposal = proposals[proposalId];
-
         require(proposal.state == PROPOSAL_STATE_ACTIVE, "RevvFiGovernance: proposal not active");
-
         require(
             msg.sender == proposal.proposer || hasRole(GUARDIAN_ROLE, msg.sender), "RevvFiGovernance: not authorized"
         );
-
         proposal.cancelled = true;
         proposal.state = PROPOSAL_STATE_CANCELLED;
-
         emit ProposalCancelled(proposalId, msg.sender);
     }
 
     function vetoProposal(uint256 proposalId) external onlyCreator proposalExists(proposalId) {
         Proposal storage proposal = proposals[proposalId];
-
         require(
             proposal.proposalType == PROPOSAL_TYPE_LOCK_REDUCTION, "RevvFiGovernance: cannot veto this proposal type"
         );
@@ -374,40 +340,27 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
         creatorVetoed[proposalId] = true;
         proposal.state = PROPOSAL_STATE_DEFEATED;
-
         emit ProposalVetoed(proposalId, msg.sender);
     }
 
     function _getApprovalThreshold(uint8 proposalType) internal pure returns (uint256) {
-        if (proposalType == PROPOSAL_TYPE_TREASURY) {
-            return 6000;
-        } else if (proposalType == PROPOSAL_TYPE_STRATEGIC) {
-            return 6600;
-        } else if (proposalType == PROPOSAL_TYPE_LOCK_REDUCTION) {
-            return 7500;
-        } else if (proposalType == PROPOSAL_TYPE_EMERGENCY) {
-            return 8000;
-        }
+        if (proposalType == PROPOSAL_TYPE_TREASURY) return 6000;
+        if (proposalType == PROPOSAL_TYPE_STRATEGIC) return 6600;
+        if (proposalType == PROPOSAL_TYPE_LOCK_REDUCTION) return 7500;
+        if (proposalType == PROPOSAL_TYPE_EMERGENCY) return 8000;
         return 6000;
     }
 
     function _getQuorumThreshold(uint8 proposalType) internal pure returns (uint256) {
-        if (proposalType == PROPOSAL_TYPE_EMERGENCY) {
-            return 2000;
-        }
+        if (proposalType == PROPOSAL_TYPE_EMERGENCY) return 2000;
         return 3000;
     }
 
     function _getTimelockDuration(uint8 proposalType) internal pure returns (uint256) {
-        if (proposalType == PROPOSAL_TYPE_TREASURY) {
-            return TREASURY_TIMELOCK;
-        } else if (proposalType == PROPOSAL_TYPE_STRATEGIC) {
-            return STRATEGIC_TIMELOCK;
-        } else if (proposalType == PROPOSAL_TYPE_LOCK_REDUCTION) {
-            return LOCK_REDUCTION_TIMELOCK;
-        } else if (proposalType == PROPOSAL_TYPE_EMERGENCY) {
-            return EMERGENCY_TIMELOCK;
-        }
+        if (proposalType == PROPOSAL_TYPE_TREASURY) return TREASURY_TIMELOCK;
+        if (proposalType == PROPOSAL_TYPE_STRATEGIC) return STRATEGIC_TIMELOCK;
+        if (proposalType == PROPOSAL_TYPE_LOCK_REDUCTION) return LOCK_REDUCTION_TIMELOCK;
+        if (proposalType == PROPOSAL_TYPE_EMERGENCY) return EMERGENCY_TIMELOCK;
         return 7 days;
     }
 
@@ -426,19 +379,12 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
     function getProposalState(uint256 proposalId) public view returns (uint8) {
         Proposal storage proposal = proposals[proposalId];
-
         if (proposal.cancelled) return PROPOSAL_STATE_CANCELLED;
         if (proposal.executed) return PROPOSAL_STATE_EXECUTED;
-        if (proposal.state == PROPOSAL_STATE_SUCCEEDED) {
-            if (block.timestamp < proposalTimelock[proposalId]) {
-                return PROPOSAL_STATE_SUCCEEDED;
-            }
-            return PROPOSAL_STATE_SUCCEEDED;
-        }
+        if (proposal.state == PROPOSAL_STATE_SUCCEEDED) return PROPOSAL_STATE_SUCCEEDED;
         if (proposal.state == PROPOSAL_STATE_DEFEATED) return PROPOSAL_STATE_DEFEATED;
         if (block.timestamp < proposal.startTime) return PROPOSAL_STATE_PENDING;
         if (block.timestamp <= proposal.endTime) return PROPOSAL_STATE_ACTIVE;
-
         return PROPOSAL_STATE_PENDING;
     }
 
@@ -464,8 +410,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
             passesThreshold = false;
         } else {
             approvalPercentage = (forVotes * BASIS_POINTS) / totalVotes;
-            uint256 threshold = _getApprovalThreshold(proposal.proposalType);
-            passesThreshold = approvalPercentage >= threshold;
+            passesThreshold = approvalPercentage >= _getApprovalThreshold(proposal.proposalType);
         }
 
         uint256 quorumRequired =
@@ -475,13 +420,11 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
     function canExecute(uint256 proposalId) external view returns (bool) {
         Proposal storage proposal = proposals[proposalId];
-
         if (proposal.state != PROPOSAL_STATE_SUCCEEDED) return false;
         if (proposal.executed) return false;
         if (proposal.cancelled) return false;
         if (creatorVetoed[proposalId]) return false;
         if (block.timestamp < proposalTimelock[proposalId]) return false;
-
         return true;
     }
 
@@ -513,7 +456,6 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         Proposal storage proposal = proposals[proposalId];
         require(block.timestamp > proposal.endTime, "RevvFiGovernance: voting not ended");
         require(proposal.state == PROPOSAL_STATE_ACTIVE, "RevvFiGovernance: proposal not active");
-
         _finalizeProposal(proposalId);
     }
 

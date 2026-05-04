@@ -4,7 +4,6 @@ pragma solidity 0.8.33;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title CreatorVestingVault
@@ -357,4 +356,7 @@ contract CreatorVestingVault is ReentrancyGuard {
         return block.timestamp < _vestingSchedule.startTime + _vestingSchedule.cliffDuration;
     }
 }
+
+// =============================================================
 // Interface moved to interfaces/ICreatorVestingVault.sol
+// =============================================================

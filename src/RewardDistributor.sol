@@ -35,10 +35,10 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
     // =============================================================
 
     struct DistributionSchedule {
-        uint256 startTime;           // When distribution begins
-        uint256 endTime;             // When distribution ends
-        uint256 totalAllocation;     // Total tokens to distribute
-        uint256 distributedSoFar;    // Tokens already distributed
+        uint256 startTime; // When distribution begins
+        uint256 endTime; // When distribution ends
+        uint256 totalAllocation; // Total tokens to distribute
+        uint256 distributedSoFar; // Tokens already distributed
     }
 
     /**
@@ -46,17 +46,17 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
      * Each claimer independently calculates their rewards using global state
      */
     struct ClaimerInfo {
-        uint256 checkpointTime;      // Last time rewards were calculated for this claimer
-        uint256 claimedAmount;       // Total rewards already claimed by this claimer
-        bool active;                 // Whether claimer is approved
+        uint256 checkpointTime; // Last time rewards were calculated for this claimer
+        uint256 claimedAmount; // Total rewards already claimed by this claimer
+        bool active; // Whether claimer is approved
     }
 
     /**
      * @dev Global reward state for checkpoint calculations
      */
     struct GlobalRewardState {
-        uint256 lastUpdateTime;      // Last time global rewards were updated
-        uint256 accumulatedRewards;  // Total rewards accumulated so far (per share basis)
+        uint256 lastUpdateTime; // Last time global rewards were updated
+        uint256 accumulatedRewards; // Total rewards accumulated so far (per share basis)
         uint256 totalActiveClaimers; // Number of active claimers
     }
 
@@ -74,7 +74,7 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
 
     // Claimer tracking - ONLY MAPPINGS, NO ARRAYS
     mapping(address => ClaimerInfo) public claimers;
-    uint256 public totalActiveClaimers;  // Tracks count without array
+    uint256 public totalActiveClaimers; // Tracks count without array
 
     // Global reward state for checkpoint calculations
     GlobalRewardState public globalState;
@@ -165,11 +165,7 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
         cumulativeDistributed = 0;
         currentEmissionRate = 0;
 
-        globalState = GlobalRewardState({
-            lastUpdateTime: 0,
-            accumulatedRewards: 0,
-            totalActiveClaimers: 0
-        });
+        globalState = GlobalRewardState({lastUpdateTime: 0, accumulatedRewards: 0, totalActiveClaimers: 0});
 
         // Setup roles
         _grantRole(DEFAULT_ADMIN_ROLE, _factory);
@@ -201,10 +197,7 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
         uint256 emissionRate = totalAllocation / (endTime - startTime);
 
         schedule = DistributionSchedule({
-            startTime: startTime,
-            endTime: endTime,
-            totalAllocation: totalAllocation,
-            distributedSoFar: 0
+            startTime: startTime, endTime: endTime, totalAllocation: totalAllocation, distributedSoFar: 0
         });
 
         currentEmissionRate = emissionRate;
@@ -237,11 +230,7 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
 
         if (claimers[claimer].checkpointTime == 0) {
             // New claimer - initialize with current global state
-            claimers[claimer] = ClaimerInfo({
-                checkpointTime: block.timestamp,
-                claimedAmount: 0,
-                active: true
-            });
+            claimers[claimer] = ClaimerInfo({checkpointTime: block.timestamp, claimedAmount: 0, active: true});
         } else {
             claimers[claimer].active = true;
             claimers[claimer].checkpointTime = block.timestamp;
@@ -338,7 +327,10 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
         uint256 currentAccumulated = globalState.accumulatedRewards;
 
         // If there's been a recent update that hasn't been checkpointed
-        if (block.timestamp > globalState.lastUpdateTime && scheduleInitialized && schedule.distributedSoFar < schedule.totalAllocation) {
+        if (
+            block.timestamp > globalState.lastUpdateTime && scheduleInitialized
+                && schedule.distributedSoFar < schedule.totalAllocation
+        ) {
             // Calculate additional rewards since last update
             uint256 currentTime = block.timestamp;
             uint256 endTime = schedule.endTime;
@@ -672,7 +664,11 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
     /**
      * @dev Returns global state
      */
-    function getGlobalState() external view returns (uint256 lastUpdateTime, uint256 accumulatedRewards, uint256 totalActive) {
+    function getGlobalState()
+        external
+        view
+        returns (uint256 lastUpdateTime, uint256 accumulatedRewards, uint256 totalActive)
+    {
         return (globalState.lastUpdateTime, globalState.accumulatedRewards, globalState.totalActiveClaimers);
     }
 }

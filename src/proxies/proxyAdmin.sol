@@ -5,4 +5,6 @@ import "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 
 /// @title MyProxyAdmin
 /// @notice Simple ProxyAdmin inheriting OpenZeppelin's implementation
-contract MyProxyAdmin is ProxyAdmin {}
+contract MyProxyAdmin is ProxyAdmin {
+    constructor(address initialOwner) ProxyAdmin(initialOwner) {}
+}

@@ -16,7 +16,7 @@ import "./interfaces/IRevvFiGovernance.sol";
 import "./interfaces/ICreatorVestingVault.sol";
 import "./interfaces/ITreasuryVault.sol";
 import "./interfaces/IStrategicReserveVault.sol";
-import "./interfaces/IRewardsDistributor.sol";
+import "./interfaces/IRewardDistributor.sol";
 import "./interfaces/IRevvFiFactory.sol";
 import "./interfaces/ICentralAuthority.sol";
 
@@ -622,7 +622,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
             uint256 startTime = block.timestamp + lockDuration;
             uint256 endTime = startTime + creatorVestingDuration;
 
-            try IRewardsDistributor(rewardsDistributor).initializeSchedule(startTime, endTime, rewardsAmount) {
+            try IRewardDistributor(rewardsDistributor).initializeSchedule(startTime, endTime, rewardsAmount) {
                 rewardsInitialized = true;
                 emit RewardsDistributorInitialized(rewardsDistributor, startTime, endTime);
 
