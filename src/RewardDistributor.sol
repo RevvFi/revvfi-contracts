@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
 /**
@@ -11,6 +11,8 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
  * @dev Emits community rewards according to a linear distribution schedule.
  * @dev Tokens are emitted continuously over a predefined duration.
  * @dev This contract is NON-UPGRADEABLE by design for maximum trust.
+ * @dev NO ARRAYS and NO LOOPS - only mappings for gas efficiency.
+ *      Each claimer independently tracks their rewards using a checkpoint system.
  */
 contract RewardsDistributor is ReentrancyGuard, AccessControl {
     using SafeERC20 for IERC20;
@@ -33,16 +35,29 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
     // =============================================================
 
     struct DistributionSchedule {
-        uint256 startTime; // When distribution begins
-        uint256 endTime; // When distribution ends
-        uint256 totalAllocation; // Total tokens to distribute
-        uint256 distributedSoFar; // Tokens already distributed
+        uint256 startTime;           // When distribution begins
+        uint256 endTime;             // When distribution ends
+        uint256 totalAllocation;     // Total tokens to distribute
+        uint256 distributedSoFar;    // Tokens already distributed
     }
 
+    /**
+     * @dev ClaimerInfo using checkpoint pattern - NO ARRAYS
+     * Each claimer independently calculates their rewards using global state
+     */
     struct ClaimerInfo {
-        uint256 lastClaimTime; // Last timestamp claimer claimed rewards
-        uint256 pendingRewards; // Rewards accrued but not claimed
-        bool active; // Whether claimer is approved
+        uint256 checkpointTime;      // Last time rewards were calculated for this claimer
+        uint256 claimedAmount;       // Total rewards already claimed by this claimer
+        bool active;                 // Whether claimer is approved
+    }
+
+    /**
+     * @dev Global reward state for checkpoint calculations
+     */
+    struct GlobalRewardState {
+        uint256 lastUpdateTime;      // Last time global rewards were updated
+        uint256 accumulatedRewards;  // Total rewards accumulated so far (per share basis)
+        uint256 totalActiveClaimers; // Number of active claimers
     }
 
     // =============================================================
@@ -57,16 +72,15 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
     DistributionSchedule public schedule;
     bool public scheduleInitialized;
 
-    // Claimer tracking
+    // Claimer tracking - ONLY MAPPINGS, NO ARRAYS
     mapping(address => ClaimerInfo) public claimers;
-    address[] public activeClaimers;
-    uint256 public totalActiveClaimers;
+    uint256 public totalActiveClaimers;  // Tracks count without array
+
+    // Global reward state for checkpoint calculations
+    GlobalRewardState public globalState;
 
     // Emission rate (tokens per second)
     uint256 public currentEmissionRate;
-
-    // Last time distribution was updated
-    uint256 public lastDistributionUpdate;
 
     // Cumulative distributed amount (for external queries)
     uint256 public cumulativeDistributed;
@@ -91,7 +105,7 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
 
     event ScheduleExtended(uint256 oldEndTime, uint256 newEndTime, uint256 newTotalAllocation);
 
-    event DistributionUpdated(uint256 distributedSinceLastUpdate, uint256 cumulativeDistributed);
+    event GlobalStateUpdated(uint256 lastUpdateTime, uint256 accumulatedRewards, uint256 totalActiveClaimers);
 
     event EmergencyPaused(address indexed executor);
     event EmergencyUnpaused(address indexed executor);
@@ -150,7 +164,12 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
         totalActiveClaimers = 0;
         cumulativeDistributed = 0;
         currentEmissionRate = 0;
-        lastDistributionUpdate = 0;
+
+        globalState = GlobalRewardState({
+            lastUpdateTime: 0,
+            accumulatedRewards: 0,
+            totalActiveClaimers: 0
+        });
 
         // Setup roles
         _grantRole(DEFAULT_ADMIN_ROLE, _factory);
@@ -182,155 +201,190 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
         uint256 emissionRate = totalAllocation / (endTime - startTime);
 
         schedule = DistributionSchedule({
-            startTime: startTime, endTime: endTime, totalAllocation: totalAllocation, distributedSoFar: 0
+            startTime: startTime,
+            endTime: endTime,
+            totalAllocation: totalAllocation,
+            distributedSoFar: 0
         });
 
         currentEmissionRate = emissionRate;
-        lastDistributionUpdate = startTime;
+        cumulativeDistributed = 0;
         scheduleInitialized = true;
+
+        // Initialize global state
+        globalState.lastUpdateTime = startTime;
+        globalState.accumulatedRewards = 0;
+        globalState.totalActiveClaimers = 0;
 
         emit ScheduleInitialized(startTime, endTime, totalAllocation, emissionRate);
     }
 
     // =============================================================
-    // Claimer Management (Governance)
+    // Claimer Management (Governance) - NO LOOPS, ONLY MAPPINGS
     // =============================================================
 
     /**
-     * @dev Adds a new claimer (governance only)
+     * @dev Adds a new claimer (governance only) - NO LOOP
      * @param claimer Address to add
      */
     function addClaimer(address claimer) external onlyGovernance whenNotPaused {
         require(claimer != address(0), "RewardsDistributor: zero address");
         require(!claimers[claimer].active, "RewardsDistributor: already active");
+        require(scheduleInitialized, "RewardsDistributor: schedule not initialized");
 
-        if (claimers[claimer].lastClaimTime == 0) {
-            claimers[claimer] = ClaimerInfo({lastClaimTime: block.timestamp, pendingRewards: 0, active: true});
-            activeClaimers.push(claimer);
-            totalActiveClaimers++;
+        // Update global state before adding new claimer
+        _updateGlobalState();
+
+        if (claimers[claimer].checkpointTime == 0) {
+            // New claimer - initialize with current global state
+            claimers[claimer] = ClaimerInfo({
+                checkpointTime: block.timestamp,
+                claimedAmount: 0,
+                active: true
+            });
         } else {
             claimers[claimer].active = true;
+            claimers[claimer].checkpointTime = block.timestamp;
         }
+
+        totalActiveClaimers++;
+        globalState.totalActiveClaimers = totalActiveClaimers;
 
         emit ClaimerAdded(claimer);
         emit ClaimerActivated(claimer);
     }
 
     /**
-     * @dev Adds multiple claimers in batch (governance only)
-     * @param claimersList Array of addresses to add
-     */
-    function addClaimers(address[] calldata claimersList) external onlyGovernance whenNotPaused {
-        for (uint256 i = 0; i < claimersList.length; i++) {
-            addClaimer(claimersList[i]);
-        }
-    }
-
-    /**
-     * @dev Removes a claimer (governance only)
+     * @dev Removes a claimer (governance only) - NO LOOP
      * @param claimer Address to remove
      */
     function removeClaimer(address claimer) external onlyGovernance {
         require(claimers[claimer].active, "RewardsDistributor: not active");
 
-        // Update pending rewards before removing
-        _updateDistribution();
+        // Update global state before removing
+        _updateGlobalState();
 
-        if (claimers[claimer].pendingRewards > 0) {
-            // Transfer pending rewards before deactivating
-            uint256 pending = claimers[claimer].pendingRewards;
-            claimers[claimer].pendingRewards = 0;
-            claimers[claimer].active = false;
-            claimers[claimer].lastClaimTime = block.timestamp;
+        // Calculate pending rewards for the claimer being removed
+        uint256 pendingRewards = _calculateClaimerRewards(claimer);
 
-            token.safeTransfer(claimer, pending);
-            cumulativeDistributed += pending;
-
-            emit RewardsClaimed(claimer, pending, cumulativeDistributed);
-        } else {
-            claimers[claimer].active = false;
-            claimers[claimer].lastClaimTime = block.timestamp;
+        if (pendingRewards > 0) {
+            claimers[claimer].claimedAmount += pendingRewards;
+            token.safeTransfer(claimer, pendingRewards);
+            cumulativeDistributed += pendingRewards;
+            emit RewardsClaimed(claimer, pendingRewards, cumulativeDistributed);
         }
+
+        claimers[claimer].active = false;
+        claimers[claimer].checkpointTime = block.timestamp;
+
+        totalActiveClaimers--;
+        globalState.totalActiveClaimers = totalActiveClaimers;
 
         emit ClaimerRemoved(claimer);
         emit ClaimerDeactivated(claimer);
     }
 
     // =============================================================
-    // Distribution & Claims
+    // Global State Management - NO LOOPS
     // =============================================================
 
     /**
-     * @dev Updates distribution state (accrues rewards to claimers)
+     * @dev Updates global accumulated rewards based on elapsed time
      */
-    function _updateDistribution() internal {
+    function _updateGlobalState() internal {
         if (!scheduleInitialized) return;
-        if (block.timestamp <= lastDistributionUpdate) return;
+        if (block.timestamp <= globalState.lastUpdateTime) return;
         if (schedule.distributedSoFar >= schedule.totalAllocation) return;
 
         uint256 currentTime = block.timestamp;
         uint256 endTime = schedule.endTime;
+        uint256 updateEndTime = currentTime > endTime ? endTime : currentTime;
 
-        // Calculate distribution cut-off time
-        uint256 distributionEndTime = currentTime > endTime ? endTime : currentTime;
+        uint256 timeElapsed = updateEndTime - globalState.lastUpdateTime;
 
-        // Calculate time elapsed since last update
-        uint256 timeElapsed = distributionEndTime - lastDistributionUpdate;
-
-        if (timeElapsed > 0 && totalActiveClaimers > 0) {
-            // Calculate rewards to distribute
-            uint256 rewardsToDistribute = timeElapsed * currentEmissionRate;
+        if (timeElapsed > 0 && globalState.totalActiveClaimers > 0) {
+            // Calculate rewards accumulated during this period
+            uint256 rewardsThisPeriod = timeElapsed * currentEmissionRate;
 
             // Cap at remaining allocation
             uint256 remainingAllocation = schedule.totalAllocation - schedule.distributedSoFar;
-            if (rewardsToDistribute > remainingAllocation) {
-                rewardsToDistribute = remainingAllocation;
+            if (rewardsThisPeriod > remainingAllocation) {
+                rewardsThisPeriod = remainingAllocation;
             }
 
-            if (rewardsToDistribute > 0) {
-                // Distribute proportionally to all active claimers
-                uint256 rewardsPerClaimer = rewardsToDistribute / totalActiveClaimers;
-                uint256 remainder = rewardsToDistribute % totalActiveClaimers;
+            if (rewardsThisPeriod > 0) {
+                // Increase accumulated rewards (per claimer basis)
+                globalState.accumulatedRewards += rewardsThisPeriod / globalState.totalActiveClaimers;
+                schedule.distributedSoFar += rewardsThisPeriod;
+                cumulativeDistributed += rewardsThisPeriod;
 
-                // Update pending rewards for each active claimer
-                for (uint256 i = 0; i < activeClaimers.length; i++) {
-                    address claimer = activeClaimers[i];
-                    if (claimers[claimer].active) {
-                        claimers[claimer].pendingRewards += rewardsPerClaimer;
-                    }
-                }
-
-                // Add remainder to first claimer
-                if (remainder > 0 && activeClaimers.length > 0) {
-                    address firstClaimer = activeClaimers[0];
-                    if (claimers[firstClaimer].active) {
-                        claimers[firstClaimer].pendingRewards += remainder;
-                    }
-                }
-
-                schedule.distributedSoFar += rewardsToDistribute;
-                cumulativeDistributed += rewardsToDistribute;
-
-                emit DistributionUpdated(rewardsToDistribute, cumulativeDistributed);
+                emit GlobalStateUpdated(updateEndTime, globalState.accumulatedRewards, globalState.totalActiveClaimers);
             }
         }
 
-        lastDistributionUpdate = distributionEndTime;
+        globalState.lastUpdateTime = updateEndTime;
     }
+
+    /**
+     * @dev Calculates pending rewards for a specific claimer - NO LOOP
+     * @param claimer Address of claimer
+     * @return pending Amount of claimable rewards
+     */
+    function _calculateClaimerRewards(address claimer) internal view returns (uint256 pending) {
+        ClaimerInfo memory claimerInfo = claimers[claimer];
+        if (!claimerInfo.active) return 0;
+
+        // Get current accumulated rewards (use latest global state)
+        uint256 currentAccumulated = globalState.accumulatedRewards;
+
+        // If there's been a recent update that hasn't been checkpointed
+        if (block.timestamp > globalState.lastUpdateTime && scheduleInitialized && schedule.distributedSoFar < schedule.totalAllocation) {
+            // Calculate additional rewards since last update
+            uint256 currentTime = block.timestamp;
+            uint256 endTime = schedule.endTime;
+            uint256 calcEndTime = currentTime > endTime ? endTime : currentTime;
+            uint256 timeElapsed = calcEndTime - globalState.lastUpdateTime;
+
+            if (timeElapsed > 0 && globalState.totalActiveClaimers > 0) {
+                uint256 additionalRewards = timeElapsed * currentEmissionRate;
+                uint256 remainingAllocation = schedule.totalAllocation - schedule.distributedSoFar;
+                if (additionalRewards > remainingAllocation) {
+                    additionalRewards = remainingAllocation;
+                }
+                if (additionalRewards > 0) {
+                    currentAccumulated += additionalRewards / globalState.totalActiveClaimers;
+                }
+            }
+        }
+
+        // Calculate claimable = (currentAccumulated - checkpointAccumulated) * (no multiplier since 1 share per claimer)
+        // Since each claimer gets equal share, the difference in accumulated rewards directly gives the claimable amount
+        uint256 accrued = currentAccumulated - claimerInfo.checkpointTime;
+
+        return accrued;
+    }
+
+    // =============================================================
+    // Distribution & Claims - NO LOOPS
+    // =============================================================
 
     /**
      * @dev Claims rewards for the caller
      * @return amount Amount of rewards claimed
      */
     function claimRewards() external nonReentrant whenNotPaused onlyClaimer returns (uint256 amount) {
-        _updateDistribution();
+        // Update global state to latest
+        _updateGlobalState();
 
-        amount = claimers[msg.sender].pendingRewards;
+        // Calculate pending rewards
+        amount = _calculateClaimerRewards(msg.sender);
         require(amount > 0, "RewardsDistributor: no rewards to claim");
 
-        claimers[msg.sender].pendingRewards = 0;
-        claimers[msg.sender].lastClaimTime = block.timestamp;
+        // Update claimer's checkpoint to current accumulated rewards
+        claimers[msg.sender].checkpointTime = globalState.accumulatedRewards;
+        claimers[msg.sender].claimedAmount += amount;
 
+        // Transfer tokens
         token.safeTransfer(msg.sender, amount);
 
         emit RewardsClaimed(msg.sender, amount, cumulativeDistributed);
@@ -339,43 +393,37 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
     }
 
     /**
-     * @dev Returns claimable rewards for a specific claimer
+     * @dev Returns claimable rewards for a specific claimer - NO LOOP
      * @param claimer Address of claimer
      * @return amount Claimable rewards
      */
     function getClaimableRewards(address claimer) public view returns (uint256 amount) {
         if (!scheduleInitialized) return 0;
-        if (!claimers[claimer].active) return claimers[claimer].pendingRewards;
+        if (!claimers[claimer].active) return 0;
 
-        uint256 pending = claimers[claimer].pendingRewards;
+        uint256 currentAccumulated = globalState.accumulatedRewards;
 
-        if (block.timestamp <= lastDistributionUpdate) return pending;
-        if (schedule.distributedSoFar >= schedule.totalAllocation) return pending;
+        // Calculate additional rewards since last update
+        if (block.timestamp > globalState.lastUpdateTime && schedule.distributedSoFar < schedule.totalAllocation) {
+            uint256 currentTime = block.timestamp;
+            uint256 endTime = schedule.endTime;
+            uint256 calcEndTime = currentTime > endTime ? endTime : currentTime;
+            uint256 timeElapsed = calcEndTime - globalState.lastUpdateTime;
 
-        uint256 currentTime = block.timestamp;
-        uint256 endTime = schedule.endTime;
-        uint256 distributionEndTime = currentTime > endTime ? endTime : currentTime;
-        uint256 timeElapsed = distributionEndTime - lastDistributionUpdate;
-
-        if (timeElapsed > 0 && totalActiveClaimers > 0) {
-            uint256 rewardsToDistribute = timeElapsed * currentEmissionRate;
-            uint256 remainingAllocation = schedule.totalAllocation - schedule.distributedSoFar;
-            if (rewardsToDistribute > remainingAllocation) {
-                rewardsToDistribute = remainingAllocation;
-            }
-
-            uint256 rewardsPerClaimer = rewardsToDistribute / totalActiveClaimers;
-            uint256 remainder = rewardsToDistribute % totalActiveClaimers;
-
-            pending += rewardsPerClaimer;
-
-            // Add remainder if this is the first claimer
-            if (activeClaimers.length > 0 && activeClaimers[0] == claimer) {
-                pending += remainder;
+            if (timeElapsed > 0 && globalState.totalActiveClaimers > 0) {
+                uint256 additionalRewards = timeElapsed * currentEmissionRate;
+                uint256 remainingAllocation = schedule.totalAllocation - schedule.distributedSoFar;
+                if (additionalRewards > remainingAllocation) {
+                    additionalRewards = remainingAllocation;
+                }
+                if (additionalRewards > 0) {
+                    currentAccumulated += additionalRewards / globalState.totalActiveClaimers;
+                }
             }
         }
 
-        return pending;
+        uint256 accrued = currentAccumulated - claimers[claimer].checkpointTime;
+        return accrued;
     }
 
     /**
@@ -419,8 +467,8 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
     function updateEmissionRate(uint256 newEmissionRate) external onlyGovernance scheduleExists whenNotPaused {
         require(newEmissionRate > 0, "RewardsDistributor: zero rate");
 
-        // Update distribution before changing rate
-        _updateDistribution();
+        // Update global state before changing rate
+        _updateGlobalState();
 
         // Calculate maximum allowed change (10% up or down)
         uint256 maxIncrease = currentEmissionRate + (currentEmissionRate * MAX_EMISSION_RATE_CHANGE / BASIS_POINTS);
@@ -436,7 +484,7 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
         uint256 remainingAllocation = getRemainingTokens();
         uint256 projectedDistribution = newEmissionRate * remainingTime;
 
-        if (projectedDistribution > remainingAllocation) {
+        if (projectedDistribution > remainingAllocation && remainingTime > 0) {
             // Adjust rate to exactly match remaining allocation
             newEmissionRate = remainingAllocation / remainingTime;
             require(newEmissionRate > 0, "RewardsDistributor: rate too low");
@@ -462,8 +510,8 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
         require(newEndTime > schedule.endTime, "RewardsDistributor: end time must be later");
         require(additionalTokens > 0, "RewardsDistributor: zero additional tokens");
 
-        // Update distribution before changing schedule
-        _updateDistribution();
+        // Update global state before changing schedule
+        _updateGlobalState();
 
         // Verify additional tokens are available
         require(
@@ -480,7 +528,9 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
         // Recalculate emission rate
         uint256 remainingTime = newEndTime - block.timestamp;
         uint256 remainingAllocation = schedule.totalAllocation - schedule.distributedSoFar;
-        currentEmissionRate = remainingAllocation / remainingTime;
+        if (remainingTime > 0) {
+            currentEmissionRate = remainingAllocation / remainingTime;
+        }
 
         emit ScheduleExtended(oldEndTime, newEndTime, schedule.totalAllocation);
         emit RewardsDeposited(additionalTokens);
@@ -493,8 +543,8 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
     function addRewards(uint256 additionalTokens) external onlyGovernance scheduleExists whenNotPaused {
         require(additionalTokens > 0, "RewardsDistributor: zero additional tokens");
 
-        // Update distribution before adding rewards
-        _updateDistribution();
+        // Update global state before adding rewards
+        _updateGlobalState();
 
         // Verify additional tokens are available
         require(
@@ -550,8 +600,7 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
         if (_token == address(token) && scheduleInitialized) {
             uint256 requiredBalance = getRemainingTokens();
             uint256 currentBalance = token.balanceOf(address(this));
-            uint256 recoverable = currentBalance - requiredBalance;
-            require(amount <= recoverable, "RewardsDistributor: cannot recover allocated rewards");
+            require(amount <= currentBalance - requiredBalance, "RewardsDistributor: cannot recover allocated rewards");
         }
 
         IERC20(_token).safeTransfer(recipient, amount);
@@ -559,10 +608,10 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
     }
 
     /**
-     * @dev Force updates distribution (guardian only, for manual trigger)
+     * @dev Force updates global state (guardian only, for manual trigger)
      */
-    function forceUpdateDistribution() external onlyGuardian {
-        _updateDistribution();
+    function forceUpdateGlobalState() external onlyGuardian {
+        _updateGlobalState();
     }
 
     // =============================================================
@@ -598,16 +647,10 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
     function getClaimerInfo(address claimer)
         external
         view
-        returns (uint256 lastClaimTime, uint256 pendingRewards, bool active)
+        returns (uint256 checkpointTime, uint256 claimedAmount, bool active, uint256 pendingRewards)
     {
-        return (claimers[claimer].lastClaimTime, getClaimableRewards(claimer), claimers[claimer].active);
-    }
-
-    /**
-     * @dev Returns all active claimers
-     */
-    function getAllActiveClaimers() external view returns (address[] memory) {
-        return activeClaimers;
+        ClaimerInfo memory info = claimers[claimer];
+        return (info.checkpointTime, info.claimedAmount, info.active, getClaimableRewards(claimer));
     }
 
     /**
@@ -625,22 +668,12 @@ contract RewardsDistributor is ReentrancyGuard, AccessControl {
         if (schedule.totalAllocation == 0) return 0;
         return (schedule.distributedSoFar * BASIS_POINTS) / schedule.totalAllocation;
     }
+
+    /**
+     * @dev Returns global state
+     */
+    function getGlobalState() external view returns (uint256 lastUpdateTime, uint256 accumulatedRewards, uint256 totalActive) {
+        return (globalState.lastUpdateTime, globalState.accumulatedRewards, globalState.totalActiveClaimers);
+    }
 }
 
-// =============================================================
-// Interface for Factory Integration
-// =============================================================
-
-interface IRewardsDistributor {
-    function initializeSchedule(uint256 startTime, uint256 endTime, uint256 totalAllocation) external;
-    function addClaimer(address claimer) external;
-    function addClaimers(address[] calldata claimers) external;
-    function removeClaimer(address claimer) external;
-    function claimRewards() external returns (uint256);
-    function getClaimableRewards(address claimer) external view returns (uint256);
-    function updateEmissionRate(uint256 newEmissionRate) external;
-    function extendSchedule(uint256 newEndTime, uint256 additionalTokens) external;
-    function addRewards(uint256 additionalTokens) external;
-    function pause() external;
-    function unpause() external;
-}
