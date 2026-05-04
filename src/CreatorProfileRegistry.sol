@@ -9,11 +9,7 @@ import "@openzeppelin/contracts/utils/Strings.sol";
 // =============================================================
 // CreatorProfileRegistry
 // =============================================================
-contract CreatorProfileRegistry is
-    Initializable,
-    AccessControlUpgradeable,
-    PausableUpgradeable
-{
+contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, PausableUpgradeable {
     using Strings for uint256;
 
     // =============================================================
@@ -79,8 +75,7 @@ contract CreatorProfileRegistry is
     // =============================================================
     mapping(address => CreatorProfile) public profiles;
     mapping(address => LaunchRecord[]) public creatorLaunches;
-    mapping(address => mapping(string => SocialVerification))
-        public socialVerifications;
+    mapping(address => mapping(string => SocialVerification)) public socialVerifications;
 
     mapping(address => bool) public blacklisted;
     mapping(address => string) public blacklistReason;
@@ -92,18 +87,9 @@ contract CreatorProfileRegistry is
     // =============================================================
     // Events
     // =============================================================
-    event ProfileRegistered(
-        address indexed creator,
-        string name,
-        uint256 reputationScore
-    );
+    event ProfileRegistered(address indexed creator, string name, uint256 reputationScore);
 
-    event ReputationUpdated(
-        address indexed creator,
-        uint256 oldScore,
-        uint256 newScore,
-        string reason
-    );
+    event ReputationUpdated(address indexed creator, uint256 oldScore, uint256 newScore, string reason);
 
     event KYCVerified(address indexed creator, address indexed verifier);
 
@@ -122,11 +108,7 @@ contract CreatorProfileRegistry is
     // =============================================================
     // Initializer
     // =============================================================
-    function initialize(
-        address _factory,
-        address _feeRecipient,
-        uint256 _registrationFee
-    ) external initializer {
+    function initialize(address _factory, address _feeRecipient, uint256 _registrationFee) external initializer {
         __AccessControl_init();
         __Pausable_init();
 
@@ -176,7 +158,7 @@ contract CreatorProfileRegistry is
         require(msg.value >= registrationFee, "fee required");
 
         if (registrationFee > 0) {
-            (bool sent, ) = feeRecipient.call{value: msg.value}("");
+            (bool sent,) = feeRecipient.call{value: msg.value}("");
             require(sent, "fee transfer failed");
         }
 
@@ -203,11 +185,7 @@ contract CreatorProfileRegistry is
     // =============================================================
     // Reputation Logic
     // =============================================================
-    function _updateReputation(
-        address creator,
-        int256 delta,
-        string memory reason
-    ) internal {
+    function _updateReputation(address creator, int256 delta, string memory reason) internal {
         CreatorProfile storage p = profiles[creator];
 
         int256 newScore = int256(p.reputationScore) + delta;
@@ -238,10 +216,7 @@ contract CreatorProfileRegistry is
     // =============================================================
     // Blacklist
     // =============================================================
-    function blacklist(
-        address creator,
-        string calldata reason
-    ) external onlyGuardian {
+    function blacklist(address creator, string calldata reason) external onlyGuardian {
         blacklisted[creator] = true;
         blacklistReason[creator] = reason;
 

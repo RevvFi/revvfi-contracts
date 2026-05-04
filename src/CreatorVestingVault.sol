@@ -18,40 +18,40 @@ contract CreatorVestingVault is ReentrancyGuard {
     // =============================================================
     // Structs
     // =============================================================
-    
+
     /**
      * @dev Vesting schedule configuration
      */
     struct VestingSchedule {
-        address token;              // Token being vested
-        address beneficiary;        // Creator address receiving tokens
-        uint256 cliffDuration;      // Seconds until first release
-        uint256 vestingDuration;    // Total vesting period after cliff (seconds)
-        uint256 startTime;          // Timestamp when vesting begins (launch time)
-        uint256 totalAmount;        // Total tokens allocated to creator
-        uint256 releasedAmount;     // Tokens already claimed
-        bool initialized;           // Whether schedule is initialized
+        address token; // Token being vested
+        address beneficiary; // Creator address receiving tokens
+        uint256 cliffDuration; // Seconds until first release
+        uint256 vestingDuration; // Total vesting period after cliff (seconds)
+        uint256 startTime; // Timestamp when vesting begins (launch time)
+        uint256 totalAmount; // Total tokens allocated to creator
+        uint256 releasedAmount; // Tokens already claimed
+        bool initialized; // Whether schedule is initialized
     }
-    
+
     // =============================================================
     // State Variables
     // =============================================================
-    
+
     VestingSchedule private _vestingSchedule;
-    
+
     // Address that can update vesting parameters (factory/guardian)
     address public immutable factory;
-    
+
     // Platform fee recipient for potential clawback (emergency only)
     address public immutable platformFeeRecipient;
-    
+
     // Emergency flag - if true, vesting can be paused (only by guardian in extreme cases)
     bool public emergencyPaused;
-    
+
     // =============================================================
     // Events
     // =============================================================
-    
+
     event VestingInitialized(
         address indexed token,
         address indexed beneficiary,
@@ -60,60 +60,56 @@ contract CreatorVestingVault is ReentrancyGuard {
         uint256 vestingDuration,
         uint256 startTime
     );
-    
+
     event TokensReleased(
-        address indexed beneficiary,
-        uint256 amountReleased,
-        uint256 totalReleasedSoFar,
-        uint256 remainingAmount
+        address indexed beneficiary, uint256 amountReleased, uint256 totalReleasedSoFar, uint256 remainingAmount
     );
-    
+
     event EmergencyPaused(address indexed executor);
     event EmergencyUnpaused(address indexed executor);
     event TokensRecovered(address indexed token, uint256 amount, address indexed recipient);
-    
+
     // =============================================================
     // Modifiers
     // =============================================================
-    
+
     modifier onlyFactory() {
         require(msg.sender == factory, "CreatorVestingVault: not factory");
         _;
     }
-    
+
     modifier onlyBeneficiary() {
         require(msg.sender == _vestingSchedule.beneficiary, "CreatorVestingVault: not beneficiary");
         _;
     }
-    
+
     modifier onlyGuardian() {
-        require(msg.sender == factory || msg.sender == platformFeeRecipient, 
-            "CreatorVestingVault: not authorized");
+        require(msg.sender == factory || msg.sender == platformFeeRecipient, "CreatorVestingVault: not authorized");
         _;
     }
-    
+
     modifier whenNotPaused() {
         require(!emergencyPaused, "CreatorVestingVault: emergency paused");
         _;
     }
-    
+
     // =============================================================
     // Constructor
     // =============================================================
-    
+
     constructor(address _factory, address _platformFeeRecipient) {
         require(_factory != address(0), "CreatorVestingVault: zero factory");
         require(_platformFeeRecipient != address(0), "CreatorVestingVault: zero fee recipient");
-        
+
         factory = _factory;
         platformFeeRecipient = _platformFeeRecipient;
         emergencyPaused = false;
     }
-    
+
     // =============================================================
     // Initialization Functions
     // =============================================================
-    
+
     /**
      * @dev Initializes vesting schedule (called by factory)
      * @param token Token address
@@ -138,10 +134,10 @@ contract CreatorVestingVault is ReentrancyGuard {
         require(vestingDuration > 0, "CreatorVestingVault: zero vesting duration");
         require(startTime > 0, "CreatorVestingVault: zero start time");
         require(cliffDuration <= vestingDuration, "CreatorVestingVault: cliff > vesting duration");
-        
+
         // Transfer tokens to this contract
         IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
-        
+
         _vestingSchedule = VestingSchedule({
             token: token,
             beneficiary: beneficiary,
@@ -152,39 +148,39 @@ contract CreatorVestingVault is ReentrancyGuard {
             releasedAmount: 0,
             initialized: true
         });
-        
+
         emit VestingInitialized(token, beneficiary, totalAmount, cliffDuration, vestingDuration, startTime);
     }
-    
+
     // =============================================================
     // Core Functions
     // =============================================================
-    
+
     /**
      * @dev Releases claimable tokens to beneficiary
      * @return amount Amount of tokens released
      */
     function release() external nonReentrant onlyBeneficiary whenNotPaused returns (uint256 amount) {
         require(_vestingSchedule.initialized, "CreatorVestingVault: not initialized");
-        
+
         uint256 claimableAmount = getClaimableAmount();
         require(claimableAmount > 0, "CreatorVestingVault: nothing to release");
-        
+
         _vestingSchedule.releasedAmount += claimableAmount;
-        
+
         IERC20 token = IERC20(_vestingSchedule.token);
         token.safeTransfer(_vestingSchedule.beneficiary, claimableAmount);
-        
+
         emit TokensReleased(
             _vestingSchedule.beneficiary,
             claimableAmount,
             _vestingSchedule.releasedAmount,
             _vestingSchedule.totalAmount - _vestingSchedule.releasedAmount
         );
-        
+
         return claimableAmount;
     }
-    
+
     /**
      * @dev Gets currently claimable amount
      * @return amount Claimable tokens
@@ -193,31 +189,31 @@ contract CreatorVestingVault is ReentrancyGuard {
         if (!_vestingSchedule.initialized) {
             return 0;
         }
-        
+
         VestingSchedule memory schedule = _vestingSchedule;
-        
+
         // Before cliff: nothing claimable
         if (block.timestamp < schedule.startTime + schedule.cliffDuration) {
             return 0;
         }
-        
+
         // After full vesting: claim all remaining
         if (block.timestamp >= schedule.startTime + schedule.cliffDuration + schedule.vestingDuration) {
             return schedule.totalAmount - schedule.releasedAmount;
         }
-        
+
         // During vesting: calculate linear release
         uint256 elapsed = block.timestamp - (schedule.startTime + schedule.cliffDuration);
         uint256 vestedTotal = (schedule.totalAmount * elapsed) / schedule.vestingDuration;
-        
+
         // Subtract already released
         if (vestedTotal > schedule.releasedAmount) {
             return vestedTotal - schedule.releasedAmount;
         }
-        
+
         return 0;
     }
-    
+
     /**
      * @dev Returns total vested amount at current time
      * @return totalVested Total tokens vested so far
@@ -226,21 +222,21 @@ contract CreatorVestingVault is ReentrancyGuard {
         if (!_vestingSchedule.initialized) {
             return 0;
         }
-        
+
         VestingSchedule memory schedule = _vestingSchedule;
-        
+
         if (block.timestamp < schedule.startTime + schedule.cliffDuration) {
             return 0;
         }
-        
+
         if (block.timestamp >= schedule.startTime + schedule.cliffDuration + schedule.vestingDuration) {
             return schedule.totalAmount;
         }
-        
+
         uint256 elapsed = block.timestamp - (schedule.startTime + schedule.cliffDuration);
         return (schedule.totalAmount * elapsed) / schedule.vestingDuration;
     }
-    
+
     /**
      * @dev Returns remaining locked tokens
      * @return remaining Tokens still locked
@@ -249,14 +245,14 @@ contract CreatorVestingVault is ReentrancyGuard {
         if (!_vestingSchedule.initialized) {
             return 0;
         }
-        
+
         return _vestingSchedule.totalAmount - getTotalVested();
     }
-    
+
     // =============================================================
     // Emergency Functions (Guardian Only)
     // =============================================================
-    
+
     /**
      * @dev Pauses vesting releases (emergency only)
      */
@@ -264,7 +260,7 @@ contract CreatorVestingVault is ReentrancyGuard {
         emergencyPaused = true;
         emit EmergencyPaused(msg.sender);
     }
-    
+
     /**
      * @dev Unpauses vesting releases
      */
@@ -272,7 +268,7 @@ contract CreatorVestingVault is ReentrancyGuard {
         emergencyPaused = false;
         emit EmergencyUnpaused(msg.sender);
     }
-    
+
     /**
      * @dev Recovers any tokens sent to this contract by mistake (guardian only)
      * @param token Token address to recover
@@ -283,7 +279,7 @@ contract CreatorVestingVault is ReentrancyGuard {
         require(token != address(0), "CreatorVestingVault: zero token");
         require(recipient != address(0), "CreatorVestingVault: zero recipient");
         require(amount > 0, "CreatorVestingVault: zero amount");
-        
+
         // Cannot recover the vested token if it's still locked
         if (token == _vestingSchedule.token) {
             uint256 remainingLocked = getRemainingLocked();
@@ -291,28 +287,32 @@ contract CreatorVestingVault is ReentrancyGuard {
             uint256 recoverable = contractBalance - remainingLocked;
             require(amount <= recoverable, "CreatorVestingVault: cannot recover locked tokens");
         }
-        
+
         IERC20(token).safeTransfer(recipient, amount);
         emit TokensRecovered(token, amount, recipient);
     }
-    
+
     // =============================================================
     // View Functions
     // =============================================================
-    
+
     /**
      * @dev Returns vesting schedule details
      */
-    function getVestingSchedule() external view returns (
-        address token,
-        address beneficiary,
-        uint256 cliffDuration,
-        uint256 vestingDuration,
-        uint256 startTime,
-        uint256 totalAmount,
-        uint256 releasedAmount,
-        bool initialized
-    ) {
+    function getVestingSchedule()
+        external
+        view
+        returns (
+            address token,
+            address beneficiary,
+            uint256 cliffDuration,
+            uint256 vestingDuration,
+            uint256 startTime,
+            uint256 totalAmount,
+            uint256 releasedAmount,
+            bool initialized
+        )
+    {
         VestingSchedule memory schedule = _vestingSchedule;
         return (
             schedule.token,
@@ -325,7 +325,7 @@ contract CreatorVestingVault is ReentrancyGuard {
             schedule.initialized
         );
     }
-    
+
     /**
      * @dev Returns contract balance of vested token
      */
@@ -335,7 +335,7 @@ contract CreatorVestingVault is ReentrancyGuard {
         }
         return IERC20(_vestingSchedule.token).balanceOf(address(this));
     }
-    
+
     /**
      * @dev Checks if vesting is fully completed
      */
@@ -343,9 +343,10 @@ contract CreatorVestingVault is ReentrancyGuard {
         if (!_vestingSchedule.initialized) {
             return false;
         }
-        return block.timestamp >= _vestingSchedule.startTime + _vestingSchedule.cliffDuration + _vestingSchedule.vestingDuration;
+        return block.timestamp
+            >= _vestingSchedule.startTime + _vestingSchedule.cliffDuration + _vestingSchedule.vestingDuration;
     }
-    
+
     /**
      * @dev Checks if vesting is still in cliff period
      */
@@ -370,21 +371,24 @@ interface ICreatorVestingVault {
         uint256 vestingDuration,
         uint256 startTime
     ) external;
-    
+
     function release() external returns (uint256);
     function getClaimableAmount() external view returns (uint256);
     function getTotalVested() external view returns (uint256);
     function getRemainingLocked() external view returns (uint256);
     function pause() external;
     function unpause() external;
-    function getVestingSchedule() external view returns (
-        address token,
-        address beneficiary,
-        uint256 cliffDuration,
-        uint256 vestingDuration,
-        uint256 startTime,
-        uint256 totalAmount,
-        uint256 releasedAmount,
-        bool initialized
-    );
+    function getVestingSchedule()
+        external
+        view
+        returns (
+            address token,
+            address beneficiary,
+            uint256 cliffDuration,
+            uint256 vestingDuration,
+            uint256 startTime,
+            uint256 totalAmount,
+            uint256 releasedAmount,
+            bool initialized
+        );
 }

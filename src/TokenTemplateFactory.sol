@@ -8,11 +8,7 @@ import "./tokens/CommunityToken.sol";
 import "./tokens/UtilityToken.sol";
 import "./tokens/MemeToken.sol";
 
-contract TokenTemplateFactory is
-    Initializable,
-    AccessControlUpgradeable,
-    PausableUpgradeable
-{
+contract TokenTemplateFactory is Initializable, AccessControlUpgradeable, PausableUpgradeable {
     // =============================================================
     // Roles
     // =============================================================
@@ -92,53 +88,22 @@ contract TokenTemplateFactory is
         require(initialRecipient != address(0), "Zero recipient");
 
         require(
-            templateId == TEMPLATE_COMMUNITY ||
-                templateId == TEMPLATE_UTILITY ||
-                templateId == TEMPLATE_MEME,
+            templateId == TEMPLATE_COMMUNITY || templateId == TEMPLATE_UTILITY || templateId == TEMPLATE_MEME,
             "Invalid template"
         );
 
         if (templateId == TEMPLATE_COMMUNITY) {
-            tokenAddress = address(
-                new CommunityToken(
-                    name,
-                    symbol,
-                    totalSupply,
-                    initialRecipient
-                )
-            );
+            tokenAddress = address(new CommunityToken(name, symbol, totalSupply, initialRecipient));
         } else if (templateId == TEMPLATE_UTILITY) {
-            tokenAddress = address(
-                new UtilityToken(
-                    name,
-                    symbol,
-                    totalSupply,
-                    initialRecipient
-                )
-            );
+            tokenAddress = address(new UtilityToken(name, symbol, totalSupply, initialRecipient));
         } else {
-            tokenAddress = address(
-                new MemeToken(
-                    name,
-                    symbol,
-                    totalSupply,
-                    initialRecipient
-                )
-            );
+            tokenAddress = address(new MemeToken(name, symbol, totalSupply, initialRecipient));
         }
 
         deployedTokens[tokenAddress] = true;
         totalTokensDeployed++;
 
-        emit TokenDeployed(
-            totalTokensDeployed,
-            tokenAddress,
-            initialRecipient,
-            templateId,
-            name,
-            symbol,
-            totalSupply
-        );
+        emit TokenDeployed(totalTokensDeployed, tokenAddress, initialRecipient, templateId, name, symbol, totalSupply);
     }
 
     function isRevvFiToken(address token) external view returns (bool) {
@@ -149,15 +114,9 @@ contract TokenTemplateFactory is
     // Template Registry
     // =============================================================
 
-    function addTemplate(
-        uint8 templateId,
-        address implementation
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function addTemplate(uint8 templateId, address implementation) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(implementation != address(0), "Zero implementation");
-        require(
-            templateImplementations[templateId] == address(0),
-            "Already exists"
-        );
+        require(templateImplementations[templateId] == address(0), "Already exists");
 
         templateImplementations[templateId] = implementation;
 

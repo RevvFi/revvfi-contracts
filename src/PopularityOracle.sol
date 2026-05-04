@@ -8,11 +8,7 @@ import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 // =============================================================
 // PopularityOracle
 // =============================================================
-contract PopularityOracle is
-    Initializable,
-    AccessControlUpgradeable,
-    PausableUpgradeable
-{
+contract PopularityOracle is Initializable, AccessControlUpgradeable, PausableUpgradeable {
     using StringsUpgradeable for uint256;
 
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
@@ -36,22 +32,16 @@ contract PopularityOracle is
     uint256 public cooldownPeriod;
     uint256 public minDepositorsForFullScore;
 
-    event ScoreUpdated(
-        address indexed bootstrapper,
-        uint256 oldScore,
-        uint256 newScore
-    );
+    event ScoreUpdated(address indexed bootstrapper, uint256 oldScore, uint256 newScore);
 
     constructor() {
         _disableInitializers();
     }
 
-    function initialize(
-        address _factory,
-        address _creatorRegistry,
-        uint256 _cooldownPeriod,
-        uint256 _minDepositors
-    ) external initializer {
+    function initialize(address _factory, address _creatorRegistry, uint256 _cooldownPeriod, uint256 _minDepositors)
+        external
+        initializer
+    {
         __AccessControl_init();
         __Pausable_init();
 
@@ -75,28 +65,17 @@ contract PopularityOracle is
         _;
     }
 
-    function updateScore(
-        address bootstrapper,
-        uint256 score
-    ) external onlyOracle {
+    function updateScore(address bootstrapper, uint256 score) external onlyOracle {
         require(score <= MAX_SCORE, "too high");
 
-        uint256 old = scores[bootstrapper].exists
-            ? scores[bootstrapper].score
-            : 0;
+        uint256 old = scores[bootstrapper].exists ? scores[bootstrapper].score : 0;
 
-        scores[bootstrapper] = ScoreData({
-            score: score,
-            lastUpdateTime: block.timestamp,
-            exists: true
-        });
+        scores[bootstrapper] = ScoreData({score: score, lastUpdateTime: block.timestamp, exists: true});
 
         emit ScoreUpdated(bootstrapper, old, score);
     }
 
-    function calculateScore(
-        address bootstrapper
-    ) external view returns (uint256) {
+    function calculateScore(address bootstrapper) external view returns (uint256) {
         if (!scores[bootstrapper].exists) return 0;
         return scores[bootstrapper].score;
     }

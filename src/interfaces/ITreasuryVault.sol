@@ -9,6 +9,6 @@ interface ITokenTemplateFactory {
         bytes32 templateId,
         address initialRecipient
     ) external returns (address);
-    
+
     function isRevvFiToken(address token) external view returns (bool);
 }

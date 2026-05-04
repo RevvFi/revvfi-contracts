@@ -23,12 +23,7 @@ import "./RevvFiGovernance.sol";
  * @notice Deploys complete launch ecosystems with all vaults
  * @dev Non-upgradeable implementation for vaults, factory uses Transparent Proxy pattern with UUPS upgradeability
  */
-contract RevvFiFactory is 
-    Initializable, 
-    AccessControlUpgradeable, 
-    PausableUpgradeable, 
-    ReentrancyGuardUpgradeable 
-{
+contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgradeable, ReentrancyGuardUpgradeable {
     // =============================================================
     // Custom Errors
     // =============================================================
@@ -146,7 +141,7 @@ contract RevvFiFactory is
     event LaunchSucceeded(uint256 indexed launchId, address indexed bootstrapper, uint256 maturityTime);
     event LaunchFailed(uint256 indexed launchId, address indexed bootstrapper);
     event LaunchMetadataUpdated(uint256 indexed launchId, string field, uint256 value);
-    
+
     event FeeRecipientUpdated(address indexed newRecipient);
     event UniswapRouterUpdated(address indexed newRouter);
     event WETHUpdated(address indexed newWeth);
@@ -154,7 +149,7 @@ contract RevvFiFactory is
     event CreatorRegistryUpdated(address indexed newRegistry);
     event PopularityOracleUpdated(address indexed newOracle);
     event CentralAuthorityUpdated(address indexed newAuthority);
-    
+
     event FeesUpdated(uint256 newLaunchFee, uint256 newKeeperReward);
     event DurationBoundsUpdated(uint256 minLock, uint256 maxLock, uint256 minRaise, uint256 maxRaise);
 
@@ -191,7 +186,7 @@ contract RevvFiFactory is
 
         // Delegate role checks to Central Authority
         centralAuthority = _centralAuthority;
-        
+
         // Grant self roles for initialization
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(DAO_ROLE, msg.sender);
@@ -213,7 +208,7 @@ contract RevvFiFactory is
         maxLockDuration = 730 days;
         minRaiseWindow = 7 days;
         maxRaiseWindow = 90 days;
-        
+
         // Register factory with Central Authority
         ICentralAuthority(centralAuthority).setFactory(address(this));
     }
@@ -221,28 +216,28 @@ contract RevvFiFactory is
     // =============================================================
     // Role Check Modifiers (Using Central Authority)
     // =============================================================
-    
+
     modifier onlyDAO() {
         if (!ICentralAuthority(centralAuthority).hasRole(DAO_ROLE, msg.sender)) {
             revert UnauthorizedCaller();
         }
         _;
     }
-    
+
     modifier onlyGuardian() {
         if (!ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
             revert UnauthorizedCaller();
         }
         _;
     }
-    
+
     modifier onlyOps() {
         if (!ICentralAuthority(centralAuthority).hasRole(OPS_ROLE, msg.sender)) {
             revert UnauthorizedCaller();
         }
         _;
     }
-    
+
     modifier onlyUpgrader() {
         if (!ICentralAuthority(centralAuthority).hasRole(UPGRADER_ROLE, msg.sender)) {
             revert UnauthorizedCaller();
@@ -254,32 +249,28 @@ contract RevvFiFactory is
     // Core Launch Logic
     // =============================================================
 
-    function createLaunch(
-        LaunchConfig calldata config
-    ) external nonReentrant whenNotPaused returns (address bootstrapperAddr) {
+    function createLaunch(LaunchConfig calldata config)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (address bootstrapperAddr)
+    {
         if (msg.value != launchFee) revert InvalidFee();
-        
+
         _validateLaunchConfig(config);
         _validateTokenNameSymbol(config.tokenName, config.tokenSymbol);
 
         uint256 nonce = creatorNonce[msg.sender];
-        bytes32 salt = keccak256(
-            abi.encodePacked(msg.sender, nonce, config.tokenSymbol)
-        );
+        bytes32 salt = keccak256(abi.encodePacked(msg.sender, nonce, config.tokenSymbol));
         creatorNonce[msg.sender] = nonce + 1;
 
-        address predictedBootstrapper = Create2Upgradeable.computeAddress(
-            salt,
-            keccak256(type(RevvFiBootstrapper).creationCode)
-        );
+        address predictedBootstrapper =
+            Create2Upgradeable.computeAddress(salt, keccak256(type(RevvFiBootstrapper).creationCode));
 
-        address token = ITokenTemplateFactory(tokenTemplateFactory).deployToken(
-            config.tokenName,
-            config.tokenSymbol,
-            config.totalSupply,
-            config.templateId,
-            predictedBootstrapper
-        );
+        address token = ITokenTemplateFactory(tokenTemplateFactory)
+            .deployToken(
+                config.tokenName, config.tokenSymbol, config.totalSupply, config.templateId, predictedBootstrapper
+            );
 
         if (token == address(0)) revert DeploymentFailed();
 
@@ -287,23 +278,19 @@ contract RevvFiFactory is
         address treasuryVault = _deployTreasuryVault(token);
         address strategicReserveVault = _deployStrategicReserveVault(token);
         address rewardsDistributor = _deployRewardsDistributor(token);
-        
-        address governanceModule = _deployGovernanceModule(
-            predictedBootstrapper,
-            treasuryVault,
-            strategicReserveVault,
-            msg.sender
-        );
+
+        address governanceModule =
+            _deployGovernanceModule(predictedBootstrapper, treasuryVault, strategicReserveVault, msg.sender);
 
         bytes memory bytecode = type(RevvFiBootstrapper).creationCode;
         bootstrapperAddr = Create2Upgradeable.deploy(0, salt, bytecode);
-        
+
         if (bootstrapperAddr != predictedBootstrapper) revert Create2Failed();
         if (bootstrapperAddr == address(0)) revert DeploymentFailed();
 
         bootstrapperCount++;
         uint256 launchId = bootstrapperCount;
-        
+
         launches[launchId] = LaunchMetadata({
             launchId: launchId,
             creator: msg.sender,
@@ -317,46 +304,44 @@ contract RevvFiFactory is
 
         isDeployed[bootstrapperAddr] = true;
 
-        RevvFiBootstrapper(bootstrapperAddr).initialize(
-            msg.sender,
-            token,
-            weth,
-            uniswapRouter,
-            config.liquidityAllocation,
-            config.targetLiquidityETH,
-            config.hardCapETH,
-            config.raiseWindowDuration,
-            config.lockDuration,
-            config.creatorVestingAmount,
-            config.treasuryAmount,
-            config.strategicReserveAmount,
-            config.rewardsAmount,
-            config.creatorCliffDuration,
-            config.creatorVestingDuration,
-            platformFeeRecipient,
-            keeperReward,
-            creatorVestingVault,
-            treasuryVault,
-            strategicReserveVault,
-            rewardsDistributor,
-            governanceModule,
-            launchId,
-            centralAuthority
-        );
+        RevvFiBootstrapper(bootstrapperAddr)
+            .initialize(
+                msg.sender,
+                token,
+                weth,
+                uniswapRouter,
+                config.liquidityAllocation,
+                config.targetLiquidityETH,
+                config.hardCapETH,
+                config.raiseWindowDuration,
+                config.lockDuration,
+                config.creatorVestingAmount,
+                config.treasuryAmount,
+                config.strategicReserveAmount,
+                config.rewardsAmount,
+                config.creatorCliffDuration,
+                config.creatorVestingDuration,
+                platformFeeRecipient,
+                keeperReward,
+                creatorVestingVault,
+                treasuryVault,
+                strategicReserveVault,
+                rewardsDistributor,
+                governanceModule,
+                launchId,
+                centralAuthority
+            );
 
         ITreasuryVault(treasuryVault).initializeGovernance(governanceModule);
         IStrategicReserveVault(strategicReserveVault).initializeGovernance(governanceModule);
-        
-        (bool sent, ) = platformFeeRecipient.call{value: launchFee}("");
+
+        (bool sent,) = platformFeeRecipient.call{value: launchFee}("");
         if (!sent) revert FeeTransferFailed();
 
         if (creatorRegistry != address(0)) {
-            try ICreatorProfileRegistry(creatorRegistry).recordLaunch(
-                msg.sender,
-                launchId,
-                bootstrapperAddr,
-                config.targetLiquidityETH
-            ) {} catch {}
+            try ICreatorProfileRegistry(creatorRegistry)
+                .recordLaunch(msg.sender, launchId, bootstrapperAddr, config.targetLiquidityETH) {}
+                catch {}
         }
 
         emit LaunchCreated(
@@ -394,14 +379,11 @@ contract RevvFiFactory is
         address strategicReserveVault,
         address creator
     ) internal returns (address) {
-        return address(new RevvFiGovernance(
-            bootstrapper,
-            treasuryVault,
-            strategicReserveVault,
-            creator,
-            address(this),
-            centralAuthority
-        ));
+        return address(
+            new RevvFiGovernance(
+                bootstrapper, treasuryVault, strategicReserveVault, creator, address(this), centralAuthority
+            )
+        );
     }
 
     // =============================================================
@@ -410,18 +392,18 @@ contract RevvFiFactory is
 
     function updateLaunchSuccess(uint256 launchId, uint256 maturityTime) external {
         if (launches[launchId].bootstrapper != msg.sender) revert BootstrapperNotFound();
-        
+
         launches[launchId].maturityTime = maturityTime;
         launches[launchId].status = STATUS_LAUNCHED;
-        
+
         emit LaunchSucceeded(launchId, msg.sender, maturityTime);
     }
 
     function updateLaunchFailure(uint256 launchId) external {
         if (launches[launchId].bootstrapper != msg.sender) revert BootstrapperNotFound();
-        
+
         launches[launchId].status = STATUS_FAILED;
-        
+
         emit LaunchFailed(launchId, msg.sender);
     }
 
@@ -442,23 +424,17 @@ contract RevvFiFactory is
         return launches[launchId].bootstrapper;
     }
 
-    function getLiveLaunchStatus(address bootstrapper) external view returns (
-        uint256 totalDepositedETH,
-        uint256 totalShares,
-        bool launched,
-        bool failed,
-        uint256 maturityTime
-    ) {
-        if (!isDeployed[bootstrapper]) revert BootstrapperNotFound();
-        
+    function getLiveLaunchStatus(address bootstrapper)
+        external
+        view
+        returns (uint256 totalDepositedETH, uint256 totalShares, bool launched, bool failed, uint256 maturityTime)
+    {
+        if (!isDeployed[bootstrapper]) {
+            revert BootstrapperNotFound();
+        }
+
         IRevvFiBootstrapper b = IRevvFiBootstrapper(bootstrapper);
-        return (
-            b.totalDepositedETH(),
-            b.totalShares(),
-            b.launched(),
-            b.failed(),
-            b.maturityTime()
-        );
+        return (b.totalDepositedETH(), b.totalShares(), b.launched(), b.failed(), b.maturityTime());
     }
 
     // =============================================================
@@ -528,20 +504,18 @@ contract RevvFiFactory is
         emit FeesUpdated(newLaunchFee, newKeeperReward);
     }
 
-    function setDurationBounds(
-        uint256 newMinLock,
-        uint256 newMaxLock,
-        uint256 newMinRaise,
-        uint256 newMaxRaise
-    ) external onlyDAO {
+    function setDurationBounds(uint256 newMinLock, uint256 newMaxLock, uint256 newMinRaise, uint256 newMaxRaise)
+        external
+        onlyDAO
+    {
         if (newMinLock > newMaxLock) revert InvalidLockDuration();
         if (newMinRaise > newMaxRaise) revert InvalidRaiseWindow();
-        
+
         minLockDuration = newMinLock;
         maxLockDuration = newMaxLock;
         minRaiseWindow = newMinRaise;
         maxRaiseWindow = newMaxRaise;
-        
+
         emit DurationBoundsUpdated(newMinLock, newMaxLock, newMinRaise, newMaxRaise);
     }
 
@@ -550,11 +524,8 @@ contract RevvFiFactory is
     // =============================================================
 
     function _validateLaunchConfig(LaunchConfig calldata config) internal view {
-        uint256 totalAllocated = config.liquidityAllocation +
-            config.creatorVestingAmount +
-            config.treasuryAmount +
-            config.strategicReserveAmount +
-            config.rewardsAmount;
+        uint256 totalAllocated = config.liquidityAllocation + config.creatorVestingAmount + config.treasuryAmount
+            + config.strategicReserveAmount + config.rewardsAmount;
 
         if (totalAllocated != config.totalSupply) revert SupplyMismatch();
 
@@ -587,8 +558,8 @@ contract RevvFiFactory is
     // =============================================================
     // Storage Gap for Upgrades
     // =============================================================
-    
+
     uint256[49] private __gap;
-    
+
     error UnauthorizedCaller();
 }
