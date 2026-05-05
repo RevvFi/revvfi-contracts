@@ -31,6 +31,8 @@ interface IRevvFiBootstrapper {
 
     function shares(address user) external view returns (uint256);
     function totalShares() external view returns (uint256);
+    function totalDepositedETH() external view returns (uint256);
+    function maturityTime() external view returns (uint256);
     function launched() external view returns (bool);
     function failed() external view returns (bool);
     function creator() external view returns (address);

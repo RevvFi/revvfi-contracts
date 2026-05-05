@@ -284,6 +284,7 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
 
     function createLaunch(LaunchConfig calldata config)
         external
+        payable
         nonReentrant
         whenNotPaused
         returns (address bootstrapperAddr)
@@ -313,8 +314,7 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         if (token == address(0)) revert DeploymentFailed();
 
         // Deploy all vault contracts
-        // address creatorVestingVault = _deployCreatorVestingVault();
-        address creatorVestingVault = address(0);
+        address creatorVestingVault = _deployCreatorVestingVault();
         address treasuryVault = _deployTreasuryVault(token);
         address strategicReserveVault = _deployStrategicReserveVault(token);
         address rewardsDistributor = _deployRewardsDistributor(token);
@@ -379,9 +379,21 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         ITreasuryVault(treasuryVault).initializeGovernance(governanceModule);
         IStrategicReserveVault(strategicReserveVault).initializeGovernance(governanceModule);
 
-        // Transfer fee after successful deployment
-        (bool sent,) = platformFeeRecipient.call{value: launchFee}("");
-        if (!sent) revert FeeTransferFailed();
+        // Register all deployed contracts with CentralAuthority for role-based access
+        if (centralAuthority != address(0)) {
+            ICentralAuthority(centralAuthority).authorizeContract(creatorVestingVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
+            ICentralAuthority(centralAuthority).authorizeContract(treasuryVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
+            ICentralAuthority(centralAuthority).authorizeContract(strategicReserveVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
+            ICentralAuthority(centralAuthority).authorizeContract(rewardsDistributor, ICentralAuthority(centralAuthority).REWARDS_DISTRIBUTOR_ROLE());
+            ICentralAuthority(centralAuthority).authorizeContract(governanceModule, ICentralAuthority(centralAuthority).GOVERNANCE_MODULE_ROLE());
+        }
+
+        // Transfer fee after successful deployment (wrapped in try-catch to prevent launch failure)
+        // If fee transfer fails, launch still succeeds (prevents economic DoS)
+        bool feeSent;
+        (feeSent,) = platformFeeRecipient.call{value: launchFee}("");
+        // Note: We don't revert on fee transfer failure. This is intentional to ensure
+        // that launch cannot be prevented by a malicious fee recipient contract.
 
         // Record launch in creator registry
         if (creatorRegistry != address(0)) {
@@ -403,9 +415,9 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
     // Internal Deployment Helpers
     // =============================================================
 
-    // function _deployCreatorVestingVault() internal returns (address) {
-    //     return address(new CreatorVestingVault(address(this), platformFeeRecipient));
-    // }
+    function _deployCreatorVestingVault() internal returns (address) {
+        return address(new CreatorVestingVault(address(this), platformFeeRecipient));
+    }
 
     function _deployTreasuryVault(address token) internal returns (address) {
         return address(new TreasuryVault(token, address(this), platformFeeRecipient));
@@ -540,6 +552,10 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
     }
 
     function setFees(uint256 newLaunchFee, uint256 newKeeperReward) external onlyDAO {
+        // Validate fee bounds to prevent economic DoS
+        if (newLaunchFee > 10 ether) revert InvalidFee();
+        if (newKeeperReward > 1 ether) revert InvalidFee();
+        
         launchFee = newLaunchFee;
         keeperReward = newKeeperReward;
         emit FeesUpdated(newLaunchFee, newKeeperReward);

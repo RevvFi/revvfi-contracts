@@ -333,6 +333,11 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         _safeApprove(revvToken, uniswapRouter, type(uint256).max);
         _safeApprove(weth, uniswapRouter, type(uint256).max);
 
+        // Approve CreatorVestingVault to pull creator vesting tokens
+        if (creatorVestingVault != address(0) && _creatorVestingAmount > 0) {
+            _safeApprove(revvToken, creatorVestingVault, _creatorVestingAmount);
+        }
+
         // Register this bootstrapper with Central Authority
         ICentralAuthority(centralAuthority).authorizeContract(address(this), BOOTSTRAPPER_ROLE);
     }
@@ -394,11 +399,11 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
         maturityTime = raiseEndTime + lockDuration; // Set maturity timestamp
 
-        // Transfer tokens to vaults
-        _transferToVaults();
-
-        // Initialize creator vesting schedule
+        // Initialize creator vesting schedule FIRST (while bootstrapper has tokens)
         _initializeVestingVault();
+
+        // Transfer remaining tokens to other vaults
+        _transferToVaults();
 
         // Initialize rewards distributor schedule
         _initializeRewardsDistributor();
