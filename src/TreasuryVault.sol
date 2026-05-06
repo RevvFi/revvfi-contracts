@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "./interfaces/ICentralAuthority.sol";
 
 /**
  * @title TreasuryVault
@@ -14,6 +15,22 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
  */
 contract TreasuryVault is ReentrancyGuard, AccessControl {
     using SafeERC20 for IERC20;
+
+    // =============================================================
+    // Custom Errors
+    // =============================================================
+
+    error ZeroAddress();
+    error NotFactory();
+    error NotGovernance();
+    error NotAuthorized();
+    error EmergencyPaused();
+    error ProposalNotFound();
+    error ProposalAlreadyExecuted();
+    error ProposalCancelled();
+    error InvalidAmount();
+    error InsufficientBalance();
+    error AlreadyInitialized();
 
     // =============================================================
     // Roles
@@ -53,6 +70,7 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
     IERC20 public immutable token;
     address public immutable factory;
     address public immutable platformFeeRecipient;
+    address public immutable centralAuthority;
 
     // Governance module address
     address public governanceModule;
@@ -79,17 +97,17 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
         uint256 totalVotingPower
     );
 
-    event ProposalExecuted(
+    event ProposalRelease(
         uint256 indexed proposalId, uint256 amount, address indexed recipient, address indexed executor
     );
 
-    event ProposalCancelled(uint256 indexed proposalId, address indexed canceller);
+    event ProposalCancellationRequested(uint256 indexed proposalId, address indexed canceller);
 
     event TokensReleased(uint256 amount, address indexed recipient, uint256 totalReleasedSoFar);
 
     event GovernanceModuleUpdated(address indexed oldModule, address indexed newModule);
-    event EmergencyPaused(address indexed executor);
-    event EmergencyUnpaused(address indexed executor);
+    event TreasuryPaused(address indexed executor);
+    event TreasuryUnpaused(address indexed executor);
     event TokensRecovered(address indexed token, uint256 amount, address indexed recipient);
 
     // =============================================================
@@ -97,33 +115,35 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
     // =============================================================
 
     modifier onlyFactory() {
-        require(msg.sender == factory, "TreasuryVault: not factory");
+        if (msg.sender != factory) revert NotFactory();
         _;
     }
 
     modifier onlyGovernance() {
-        require(msg.sender == governanceModule, "TreasuryVault: not governance");
+        if (msg.sender != governanceModule) revert NotGovernance();
         _;
     }
 
     modifier onlyGuardian() {
-        require(hasRole(GUARDIAN_ROLE, msg.sender), "TreasuryVault: not guardian");
+        if (!ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+            revert NotAuthorized();
+        }
         _;
     }
 
     modifier whenNotPaused() {
-        require(!emergencyPaused, "TreasuryVault: emergency paused");
+        if (emergencyPaused) revert EmergencyPaused();
         _;
     }
 
     modifier proposalExists(uint256 proposalId) {
-        require(proposals[proposalId].createdAt > 0, "TreasuryVault: proposal not found");
+        if (proposals[proposalId].createdAt == 0) revert ProposalNotFound();
         _;
     }
 
     modifier proposalNotExecuted(uint256 proposalId) {
-        require(!proposals[proposalId].executed, "TreasuryVault: proposal already executed");
-        require(!proposals[proposalId].cancelled, "TreasuryVault: proposal cancelled");
+        if (proposals[proposalId].executed) revert ProposalAlreadyExecuted();
+        if (proposals[proposalId].cancelled) revert ProposalCancelled();
         _;
     }
 
@@ -131,14 +151,16 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
     // Constructor
     // =============================================================
 
-    constructor(address _token, address _factory, address _platformFeeRecipient) {
-        require(_token != address(0), "TreasuryVault: zero token");
-        require(_factory != address(0), "TreasuryVault: zero factory");
-        require(_platformFeeRecipient != address(0), "TreasuryVault: zero fee recipient");
+    constructor(address _token, address _factory, address _platformFeeRecipient, address _centralAuthority) {
+        if (_token == address(0)) revert ZeroAddress();
+        if (_factory == address(0)) revert ZeroAddress();
+        if (_platformFeeRecipient == address(0)) revert ZeroAddress();
+        if (_centralAuthority == address(0)) revert ZeroAddress();
 
         token = IERC20(_token);
         factory = _factory;
         platformFeeRecipient = _platformFeeRecipient;
+        centralAuthority = _centralAuthority;
         emergencyPaused = false;
         proposalCounter = 0;
         totalReleased = 0;
@@ -158,8 +180,8 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
      * @param _governanceModule Address of RevvFiGovernance contract
      */
     function initializeGovernance(address _governanceModule) external onlyFactory {
-        require(_governanceModule != address(0), "TreasuryVault: zero governance");
-        require(governanceModule == address(0), "TreasuryVault: already initialized");
+        if (_governanceModule == address(0)) revert ZeroAddress();
+        if (governanceModule != address(0)) revert AlreadyInitialized();
 
         governanceModule = _governanceModule;
         _grantRole(GOVERNANCE_ROLE, _governanceModule);
@@ -185,10 +207,10 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
         whenNotPaused
         returns (uint256 proposalId)
     {
-        require(proposer != address(0), "TreasuryVault: zero proposer");
-        require(amount > 0, "TreasuryVault: zero amount");
-        require(recipient != address(0), "TreasuryVault: zero recipient");
-        require(amount <= token.balanceOf(address(this)), "TreasuryVault: insufficient balance");
+        if (proposer == address(0)) revert ZeroAddress();
+        if (amount == 0) revert InvalidAmount();
+        if (recipient == address(0)) revert ZeroAddress();
+        if (amount > token.balanceOf(address(this))) revert InsufficientBalance();
 
         proposalCounter++;
 
@@ -224,8 +246,8 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
         proposalExists(proposalId)
         proposalNotExecuted(proposalId)
     {
-        require(voter != address(0), "TreasuryVault: zero voter");
-        require(votingPower > 0, "TreasuryVault: zero voting power");
+        if (voter == address(0)) revert ZeroAddress();
+        if (votingPower == 0) revert InvalidAmount();
 
         ReleaseProposal storage proposal = proposals[proposalId];
 
@@ -250,19 +272,19 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
         ReleaseProposal storage proposal = proposals[proposalId];
 
         // Check timelock
-        require(block.timestamp >= proposal.createdAt + TIMELOCK_DURATION, "TreasuryVault: timelock not expired");
+        if (block.timestamp < proposal.createdAt + TIMELOCK_DURATION) revert InvalidAmount();
 
         // Check approval threshold
         uint256 totalVotes = proposal.forVotes + proposal.againstVotes;
-        require(totalVotes > 0, "TreasuryVault: no votes cast");
+        if (totalVotes == 0) revert InvalidAmount();
 
         uint256 approvalPercentage = (proposal.forVotes * BASIS_POINTS) / totalVotes;
-        require(approvalPercentage >= APPROVAL_THRESHOLD, "TreasuryVault: insufficient approval");
+        if (approvalPercentage < APPROVAL_THRESHOLD) revert InvalidAmount();
 
         // Also check against total voting power (quorum)
         // Require at least 30% of total voting power participated
         uint256 quorumThreshold = (proposal.totalVotingPowerAtProposal * 3000) / BASIS_POINTS; // 30%
-        require(totalVotes >= quorumThreshold, "TreasuryVault: quorum not met");
+        if (totalVotes < quorumThreshold) revert InvalidAmount();
 
         // Execute release
         uint256 amount = proposal.amount;
@@ -274,7 +296,7 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
 
         token.safeTransfer(recipient, amount);
 
-        emit ProposalExecuted(proposalId, amount, recipient, msg.sender);
+        emit ProposalRelease(proposalId, amount, recipient, msg.sender);
         emit TokensReleased(amount, recipient, totalReleased);
     }
 
@@ -286,13 +308,15 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
         ReleaseProposal storage proposal = proposals[proposalId];
 
         // Only proposer or guardian can cancel
-        require(msg.sender == proposal.proposer || hasRole(GUARDIAN_ROLE, msg.sender), "TreasuryVault: not authorized");
+        if (msg.sender != proposal.proposer && !ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+            revert NotAuthorized();
+        }
 
         // Cannot cancel if proposal already passed timelock
-        require(block.timestamp < proposal.createdAt + TIMELOCK_DURATION, "TreasuryVault: proposal in timelock");
+        if (block.timestamp >= proposal.createdAt + TIMELOCK_DURATION) revert InvalidAmount();
 
         proposal.cancelled = true;
-        emit ProposalCancelled(proposalId, msg.sender);
+        emit ProposalCancellationRequested(proposalId, msg.sender);
     }
 
     // =============================================================
@@ -304,7 +328,7 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
      */
     function pause() external onlyGuardian {
         emergencyPaused = true;
-        emit EmergencyPaused(msg.sender);
+        emit TreasuryPaused(msg.sender);
     }
 
     /**
@@ -312,7 +336,7 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
      */
     function unpause() external onlyGuardian {
         emergencyPaused = false;
-        emit EmergencyUnpaused(msg.sender);
+        emit TreasuryUnpaused(msg.sender);
     }
 
     /**
@@ -322,13 +346,13 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
      * @param recipient Recipient address
      */
     function recoverTokens(address _token, uint256 amount, address recipient) external onlyGuardian {
-        require(_token != address(0), "TreasuryVault: zero token");
-        require(recipient != address(0), "TreasuryVault: zero recipient");
-        require(amount > 0, "TreasuryVault: zero amount");
+        if (_token == address(0)) revert ZeroAddress();
+        if (recipient == address(0)) revert ZeroAddress();
+        if (amount == 0) revert InvalidAmount();
 
         // Cannot recover the governed token (only mistakenly sent other tokens)
         if (_token == address(token)) {
-            revert("TreasuryVault: cannot recover governed token");
+            revert InvalidAmount();
         }
 
         IERC20(_token).safeTransfer(recipient, amount);
@@ -340,7 +364,8 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
      * @param newGovernanceModule New governance module address
      */
     function updateGovernanceModule(address newGovernanceModule) external onlyGuardian {
-        require(newGovernanceModule != address(0), "TreasuryVault: zero address");
+        if (newGovernanceModule == address(0)) revert ZeroAddress();
+        if (governanceModule != address(0)) revert AlreadyInitialized();
 
         address oldModule = governanceModule;
 
@@ -446,9 +471,3 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
         return totalReleased;
     }
 }
-
-// =============================================================
-// Interface for Factory Integration
-// =============================================================
-
-// Interface moved to interfaces/ITreasuryVault.sol

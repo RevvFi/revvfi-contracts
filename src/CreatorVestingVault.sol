@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "./interfaces/ICentralAuthority.sol";
 
 /**
  * @title CreatorVestingVault
@@ -14,6 +15,21 @@ import "@openzeppelin/contracts/access/Ownable.sol";
  */
 contract CreatorVestingVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
+
+    // =============================================================
+    // Custom Errors
+    // =============================================================
+
+    error ZeroAddress();
+    error NotFactory();
+    error NotBeneficiary();
+    error NotAuthorized();
+    error EmergencyPaused();
+    error AlreadyInitialized();
+    error InvalidDuration();
+    error InvalidAmount();
+    error NothingToRelease();
+    error NotInitialized();
 
     // =============================================================
     // Structs
@@ -34,6 +50,13 @@ contract CreatorVestingVault is ReentrancyGuard {
     }
 
     // =============================================================
+    // Role Constants
+    // =============================================================
+
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+    bytes32 public constant VAULT_ROLE = keccak256("VAULT_ROLE");
+
+    // =============================================================
     // State Variables
     // =============================================================
 
@@ -41,6 +64,9 @@ contract CreatorVestingVault is ReentrancyGuard {
 
     // Address that can update vesting parameters (factory/guardian)
     address public immutable factory;
+
+    // Central authority for role management
+    address public immutable centralAuthority;
 
     // Platform fee recipient for potential clawback (emergency only)
     address public immutable platformFeeRecipient;
@@ -65,8 +91,8 @@ contract CreatorVestingVault is ReentrancyGuard {
         address indexed beneficiary, uint256 amountReleased, uint256 totalReleasedSoFar, uint256 remainingAmount
     );
 
-    event EmergencyPaused(address indexed executor);
-    event EmergencyUnpaused(address indexed executor);
+    event VestingPaused(address indexed executor);
+    event VestingUnpaused(address indexed executor);
     event TokensRecovered(address indexed token, uint256 amount, address indexed recipient);
 
     // =============================================================
@@ -74,22 +100,24 @@ contract CreatorVestingVault is ReentrancyGuard {
     // =============================================================
 
     modifier onlyFactory() {
-        require(msg.sender == factory, "CreatorVestingVault: not factory");
+        if (msg.sender != factory) revert NotFactory();
         _;
     }
 
     modifier onlyBeneficiary() {
-        require(msg.sender == _vestingSchedule.beneficiary, "CreatorVestingVault: not beneficiary");
+        if (msg.sender != _vestingSchedule.beneficiary) revert NotBeneficiary();
         _;
     }
 
     modifier onlyGuardian() {
-        require(msg.sender == factory || msg.sender == platformFeeRecipient, "CreatorVestingVault: not authorized");
+        if (!ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+            revert NotAuthorized();
+        }
         _;
     }
 
     modifier whenNotPaused() {
-        require(!emergencyPaused, "CreatorVestingVault: emergency paused");
+        if (emergencyPaused) revert EmergencyPaused();
         _;
     }
 
@@ -97,12 +125,14 @@ contract CreatorVestingVault is ReentrancyGuard {
     // Constructor
     // =============================================================
 
-    constructor(address _factory, address _platformFeeRecipient) {
-        require(_factory != address(0), "CreatorVestingVault: zero factory");
-        require(_platformFeeRecipient != address(0), "CreatorVestingVault: zero fee recipient");
+    constructor(address _factory, address _platformFeeRecipient, address _centralAuthority) {
+        if (_factory == address(0)) revert ZeroAddress();
+        if (_platformFeeRecipient == address(0)) revert ZeroAddress();
+        if (_centralAuthority == address(0)) revert ZeroAddress();
 
         factory = _factory;
         platformFeeRecipient = _platformFeeRecipient;
+        centralAuthority = _centralAuthority;
         emergencyPaused = false;
     }
 
@@ -127,13 +157,13 @@ contract CreatorVestingVault is ReentrancyGuard {
         uint256 vestingDuration,
         uint256 startTime
     ) external onlyFactory {
-        require(!_vestingSchedule.initialized, "CreatorVestingVault: already initialized");
-        require(token != address(0), "CreatorVestingVault: zero token");
-        require(beneficiary != address(0), "CreatorVestingVault: zero beneficiary");
-        require(totalAmount > 0, "CreatorVestingVault: zero amount");
-        require(vestingDuration > 0, "CreatorVestingVault: zero vesting duration");
-        require(startTime > 0, "CreatorVestingVault: zero start time");
-        require(cliffDuration <= vestingDuration, "CreatorVestingVault: cliff > vesting duration");
+        if (_vestingSchedule.initialized) revert AlreadyInitialized();
+        if (token == address(0)) revert ZeroAddress();
+        if (beneficiary == address(0)) revert ZeroAddress();
+        if (totalAmount == 0) revert InvalidAmount();
+        if (vestingDuration == 0) revert InvalidDuration();
+        if (startTime == 0) revert ZeroAddress();
+        if (cliffDuration > vestingDuration) revert InvalidDuration();
 
         // Transfer tokens to this contract
         IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
@@ -161,10 +191,10 @@ contract CreatorVestingVault is ReentrancyGuard {
      * @return amount Amount of tokens released
      */
     function release() external nonReentrant onlyBeneficiary whenNotPaused returns (uint256 amount) {
-        require(_vestingSchedule.initialized, "CreatorVestingVault: not initialized");
+        if (!_vestingSchedule.initialized) revert NotInitialized();
 
         uint256 claimableAmount = getClaimableAmount();
-        require(claimableAmount > 0, "CreatorVestingVault: nothing to release");
+        if (claimableAmount == 0) revert NothingToRelease();
 
         _vestingSchedule.releasedAmount += claimableAmount;
 
@@ -258,7 +288,7 @@ contract CreatorVestingVault is ReentrancyGuard {
      */
     function pause() external onlyGuardian {
         emergencyPaused = true;
-        emit EmergencyPaused(msg.sender);
+        emit VestingPaused(msg.sender);
     }
 
     /**
@@ -266,7 +296,7 @@ contract CreatorVestingVault is ReentrancyGuard {
      */
     function unpause() external onlyGuardian {
         emergencyPaused = false;
-        emit EmergencyUnpaused(msg.sender);
+        emit VestingUnpaused(msg.sender);
     }
 
     /**
@@ -276,16 +306,16 @@ contract CreatorVestingVault is ReentrancyGuard {
      * @param recipient Recipient address
      */
     function recoverTokens(address token, uint256 amount, address recipient) external onlyGuardian {
-        require(token != address(0), "CreatorVestingVault: zero token");
-        require(recipient != address(0), "CreatorVestingVault: zero recipient");
-        require(amount > 0, "CreatorVestingVault: zero amount");
+        if (token == address(0)) revert ZeroAddress();
+        if (recipient == address(0)) revert ZeroAddress();
+        if (amount == 0) revert InvalidAmount();
 
         // Cannot recover the vested token if it's still locked
         if (token == _vestingSchedule.token) {
             uint256 remainingLocked = getRemainingLocked();
             uint256 contractBalance = IERC20(token).balanceOf(address(this));
             uint256 recoverable = contractBalance - remainingLocked;
-            require(amount <= recoverable, "CreatorVestingVault: cannot recover locked tokens");
+            if (amount > recoverable) revert InvalidAmount();
         }
 
         IERC20(token).safeTransfer(recipient, amount);

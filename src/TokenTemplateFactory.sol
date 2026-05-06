@@ -271,6 +271,6 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl {
         if (amount == 0) revert InvalidTemplateId();
 
         (bool success,) = token.call(abi.encodeWithSignature("transfer(address,uint256)", recipient, amount));
-        require(success, "TokenTemplateFactory: rescue failed");
+        if (!success) revert DeploymentFailed();
     }
 }

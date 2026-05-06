@@ -473,6 +473,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
      * @dev LP withdraws proportional ETH + tokens after maturity
      * @param shareAmount Amount of shares to burn
      * Returns both ETH and tokens from the Uniswap pool
+     * Requires minimum share amount to prevent rounding dust
      */
     function withdrawAsAssets(uint256 shareAmount) external nonReentrant afterLaunch whenNotPaused {
         if (block.timestamp < maturityTime) revert WithdrawLocked();
@@ -483,6 +484,9 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         // Calculate LP's proportional share of Uniswap LP tokens
         uint256 fraction = (shareAmount * PRECISION) / totalShares;
         uint256 lpToRemove = (fraction * uniLPTokenAmount) / PRECISION;
+
+        // Ensure we're removing at least 1 LP token (prevents dust/rounding attacks)
+        if (lpToRemove == 0) revert InvalidShareAmount();
 
         // Remove liquidity from Uniswap
         (uint256 ethOut, uint256 tokenOut) = _removeLiquidity(lpToRemove);
@@ -538,12 +542,28 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
     /**
      * @dev Adds liquidity to Uniswap V2 with specified ETH amount
+     * Includes slippage protection with 5% minimum amounts
      */
     function _addLiquidityWithAmount(uint256 ethAmount) internal {
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapRouter);
 
+        // Create pair if it doesn't exist
+        _createLPPair();
+
+        // Calculate minimum amounts with 5% slippage tolerance
+        // minTokenAmount = 95% of liquidityAllocation
+        // minETHAmount = 95% of ethAmount
+        uint256 minTokenAmount = (liquidityAllocation * 95) / 100;
+        uint256 minETHAmount = (ethAmount * 95) / 100;
+
+        // Add liquidity with correctly ordered tokens and slippage protection
         (,, uint256 liquidity) = router.addLiquidityETH{value: ethAmount}(
-            revvToken, liquidityAllocation, 0, 0, address(this), block.timestamp + DEADLINE_BUFFER
+            revvToken,
+            liquidityAllocation,
+            minTokenAmount,  // Require at least 95% of tokens
+            minETHAmount,    // Require at least 95% of ETH
+            address(this),
+            block.timestamp + DEADLINE_BUFFER
         );
 
         if (liquidity == 0) revert LiquidityAddFailed();
@@ -555,6 +575,53 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
         if (pair == address(0)) revert PairNotFound();
         uniswapPair = pair;
+    }
+
+    /**
+     * @dev Creates Uniswap V2 pair if it doesn't exist
+     */
+    function _createLPPair() internal {
+        IUniswapV2Router02 router = IUniswapV2Router02(uniswapRouter);
+        address factoryAddr = router.factory();
+        IUniswapV2Factory uniswapFactory = IUniswapV2Factory(factoryAddr);
+
+        // Check if pair already exists
+        address existingPair = uniswapFactory.getPair(revvToken, weth);
+        
+        if (existingPair == address(0)) {
+            // Create new pair
+            address newPair = uniswapFactory.createPair(revvToken, weth);
+            if (newPair == address(0)) revert PairNotFound();
+            uniswapPair = newPair;
+        } else {
+            uniswapPair = existingPair;
+        }
+    }
+
+    /**
+     * @dev Returns correctly ordered tokens for Uniswap (smaller address first)
+     * @return token0 First token (smaller address)
+     * @return token1 Second token (larger address)
+     * @return amount0 Amount for token0
+     * @return amount1 Amount for token1
+     */
+    function _getOrderedTokens()
+        internal
+        view
+        returns (address token0, address token1, uint256 amount0, uint256 amount1)
+    {
+        // Order tokens by address value (smaller first)
+        if (revvToken < weth) {
+            token0 = revvToken;
+            token1 = weth;
+            amount0 = liquidityAllocation;
+            amount1 = 0; // ETH amount handled separately by router
+        } else {
+            token0 = weth;
+            token1 = revvToken;
+            amount0 = 0; // ETH amount handled separately by router
+            amount1 = liquidityAllocation;
+        }
     }
 
     /**

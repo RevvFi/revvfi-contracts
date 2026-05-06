@@ -196,7 +196,13 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         address _creatorRegistry,
         address _popularityOracle,
         address _centralAuthority,
-        address _bootstrapperImplementation
+        address _bootstrapperImplementation,
+        uint256 _launchFee,
+        uint256 _keeperReward,
+        uint256 _minLockDuration,
+        uint256 _maxLockDuration,
+        uint256 _minRaiseWindow,
+        uint256 _maxRaiseWindow
     ) external initializer {
         __AccessControl_init();
         __Pausable_init();
@@ -208,6 +214,12 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         if (_platformFeeRecipient == address(0)) revert ZeroAddress();
         if (_centralAuthority == address(0)) revert ZeroAddress();
         if (_bootstrapperImplementation == address(0)) revert ZeroAddress();
+
+        // Validate duration and fee parameters
+        if (_minLockDuration == 0 || _maxLockDuration == 0) revert InvalidLockDuration();
+        if (_minLockDuration > _maxLockDuration) revert InvalidLockDuration();
+        if (_minRaiseWindow == 0 || _maxRaiseWindow == 0) revert InvalidRaiseWindow();
+        if (_minRaiseWindow > _maxRaiseWindow) revert InvalidRaiseWindow();
 
         centralAuthority = _centralAuthority;
 
@@ -225,12 +237,13 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         popularityOracle = _popularityOracle;
         bootstrapperImplementation = _bootstrapperImplementation;
 
-        launchFee = 0.1 ether;
-        keeperReward = 0.01 ether;
-        minLockDuration = 30 days;
-        maxLockDuration = 730 days;
-        minRaiseWindow = 7 days;
-        maxRaiseWindow = 90 days;
+        // Set fees and durations from parameters
+        launchFee = _launchFee;
+        keeperReward = _keeperReward;
+        minLockDuration = _minLockDuration;
+        maxLockDuration = _maxLockDuration;
+        minRaiseWindow = _minRaiseWindow;
+        maxRaiseWindow = _maxRaiseWindow;
 
         ICentralAuthority(centralAuthority).setFactory(address(this));
     }
@@ -305,10 +318,17 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
 
         address predictedBootstrapper = Create2Upgradeable.computeAddress(salt, keccak256(bytecode));
 
-        // Deploy token - entire supply minted to predicted bootstrapper
+        // Deploy bootstrapper FIRST using CREATE2 with minimal proxy
+        // This ensures we have the correct address before minting tokens
+        bootstrapperAddr = Create2Upgradeable.deploy(0, salt, bytecode);
+
+        if (bootstrapperAddr != predictedBootstrapper) revert Create2Failed();
+        if (bootstrapperAddr == address(0)) revert DeploymentFailed();
+
+        // NOW deploy token with ACTUAL bootstrapper address (not predicted)
         address token = ITokenTemplateFactory(tokenTemplateFactory)
             .deployToken(
-                config.tokenName, config.tokenSymbol, config.totalSupply, config.templateId, predictedBootstrapper
+                config.tokenName, config.tokenSymbol, config.totalSupply, config.templateId, bootstrapperAddr
             );
 
         if (token == address(0)) revert DeploymentFailed();
@@ -319,15 +339,9 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         address strategicReserveVault = _deployStrategicReserveVault(token);
         address rewardsDistributor = _deployRewardsDistributor(token);
 
-        // Deploy governance module
+        // Deploy governance module (now we have the actual bootstrapper address)
         address governanceModule =
-            _deployGovernanceModule(predictedBootstrapper, treasuryVault, strategicReserveVault, msg.sender);
-
-        // Deploy bootstrapper using CREATE2 with minimal proxy
-        bootstrapperAddr = Create2Upgradeable.deploy(0, salt, bytecode);
-
-        if (bootstrapperAddr != predictedBootstrapper) revert Create2Failed();
-        if (bootstrapperAddr == address(0)) revert DeploymentFailed();
+            _deployGovernanceModule(bootstrapperAddr, treasuryVault, strategicReserveVault, msg.sender);
 
         // Record launch metadata
         bootstrapperCount++;
@@ -416,15 +430,15 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
     // =============================================================
 
     function _deployCreatorVestingVault() internal returns (address) {
-        return address(new CreatorVestingVault(address(this), platformFeeRecipient));
+        return address(new CreatorVestingVault(address(this), platformFeeRecipient, centralAuthority));
     }
 
     function _deployTreasuryVault(address token) internal returns (address) {
-        return address(new TreasuryVault(token, address(this), platformFeeRecipient));
+        return address(new TreasuryVault(token, address(this), platformFeeRecipient, centralAuthority));
     }
 
     function _deployStrategicReserveVault(address token) internal returns (address) {
-        return address(new StrategicReserveVault(token, address(this), platformFeeRecipient));
+        return address(new StrategicReserveVault(token, address(this), platformFeeRecipient, centralAuthority));
     }
 
     function _deployRewardsDistributor(address token) internal returns (address) {
