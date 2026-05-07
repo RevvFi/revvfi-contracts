@@ -327,9 +327,7 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
 
         // NOW deploy token with ACTUAL bootstrapper address (not predicted)
         address token = ITokenTemplateFactory(tokenTemplateFactory)
-            .deployToken(
-                config.tokenName, config.tokenSymbol, config.totalSupply, config.templateId, bootstrapperAddr
-            );
+            .deployToken(config.tokenName, config.tokenSymbol, config.totalSupply, config.templateId, bootstrapperAddr);
 
         if (token == address(0)) revert DeploymentFailed();
 
@@ -395,11 +393,16 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
 
         // Register all deployed contracts with CentralAuthority for role-based access
         if (centralAuthority != address(0)) {
-            ICentralAuthority(centralAuthority).authorizeContract(creatorVestingVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
-            ICentralAuthority(centralAuthority).authorizeContract(treasuryVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
-            ICentralAuthority(centralAuthority).authorizeContract(strategicReserveVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
-            ICentralAuthority(centralAuthority).authorizeContract(rewardsDistributor, ICentralAuthority(centralAuthority).REWARDS_DISTRIBUTOR_ROLE());
-            ICentralAuthority(centralAuthority).authorizeContract(governanceModule, ICentralAuthority(centralAuthority).GOVERNANCE_MODULE_ROLE());
+            ICentralAuthority(centralAuthority)
+                .authorizeContract(creatorVestingVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
+            ICentralAuthority(centralAuthority)
+                .authorizeContract(treasuryVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
+            ICentralAuthority(centralAuthority)
+                .authorizeContract(strategicReserveVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
+            ICentralAuthority(centralAuthority)
+                .authorizeContract(rewardsDistributor, ICentralAuthority(centralAuthority).REWARDS_DISTRIBUTOR_ROLE());
+            ICentralAuthority(centralAuthority)
+                .authorizeContract(governanceModule, ICentralAuthority(centralAuthority).GOVERNANCE_MODULE_ROLE());
         }
 
         // Transfer fee after successful deployment (wrapped in try-catch to prevent launch failure)
@@ -569,7 +572,7 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         // Validate fee bounds to prevent economic DoS
         if (newLaunchFee > 10 ether) revert InvalidFee();
         if (newKeeperReward > 1 ether) revert InvalidFee();
-        
+
         launchFee = newLaunchFee;
         keeperReward = newKeeperReward;
         emit FeesUpdated(newLaunchFee, newKeeperReward);

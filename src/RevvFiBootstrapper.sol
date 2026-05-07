@@ -560,8 +560,8 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         (,, uint256 liquidity) = router.addLiquidityETH{value: ethAmount}(
             revvToken,
             liquidityAllocation,
-            minTokenAmount,  // Require at least 95% of tokens
-            minETHAmount,    // Require at least 95% of ETH
+            minTokenAmount, // Require at least 95% of tokens
+            minETHAmount, // Require at least 95% of ETH
             address(this),
             block.timestamp + DEADLINE_BUFFER
         );
@@ -587,7 +587,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
         // Check if pair already exists
         address existingPair = uniswapFactory.getPair(revvToken, weth);
-        
+
         if (existingPair == address(0)) {
             // Create new pair
             address newPair = uniswapFactory.createPair(revvToken, weth);

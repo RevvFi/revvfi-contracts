@@ -4,21 +4,18 @@ pragma solidity 0.8.33;
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IRevvFiBootstrapper.sol";
 import "./interfaces/ITreasuryVault.sol";
 import "./interfaces/IStrategicReserveVault.sol";
 import "./interfaces/ICentralAuthority.sol";
+import "./interfaces/IRewardDistributor.sol";
 
 /**
  * @title RevvFiGovernance
- * @dev Manages linear voting for a specific launch using LP shares (no separate governance token).
- * @dev LPs vote with their share balance. 1 share = 1 vote (linear).
- * @dev This contract is NON-UPGRADEABLE by design for maximum trust.
+ * @dev Manages linear voting for a specific launch using LP shares.
+ * @dev Auto-finalizes proposals when voting period ends.
  */
 contract RevvFiGovernance is ReentrancyGuard, AccessControl {
-    using SafeERC20 for IERC20;
-
     // =============================================================
     // Custom Errors
     // =============================================================
@@ -44,6 +41,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     error InsufficientProposingPower();
     error QuorumNotMet();
     error ApprovalThresholdNotMet();
+    error RewardsDistributorError();
 
     // =============================================================
     // Roles
@@ -57,15 +55,14 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant VOTING_PERIOD = 5 days;
     uint256 public constant MIN_PROPOSAL_THRESHOLD_BPS = 100; // 1% of total shares
-    uint256 public constant MIN_QUORUM_BPS = 6000; // 60% - Required for all proposals
+    uint256 public constant MIN_QUORUM_BPS = 3000; // 30% quorum
 
-    // Proposal types and their requirements
     uint8 public constant PROPOSAL_TYPE_TREASURY = 0;
     uint8 public constant PROPOSAL_TYPE_STRATEGIC = 1;
     uint8 public constant PROPOSAL_TYPE_LOCK_REDUCTION = 2;
     uint8 public constant PROPOSAL_TYPE_EMERGENCY = 3;
+    uint8 public constant PROPOSAL_TYPE_REWARDS_CLAIMER = 4; // New type for rewards distributor
 
-    // Proposal state
     uint8 public constant PROPOSAL_STATE_PENDING = 0;
     uint8 public constant PROPOSAL_STATE_ACTIVE = 1;
     uint8 public constant PROPOSAL_STATE_SUCCEEDED = 2;
@@ -110,24 +107,21 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     address public immutable creator;
     address public immutable factory;
     address public immutable centralAuthority;
+    address public rewardsDistributor; // Can be set by factory
 
-    // Proposal tracking
     uint256 public proposalCounter;
     mapping(uint256 => Proposal) public proposals;
     mapping(uint256 => mapping(address => Vote)) public votes;
-
-    // Timelock tracking - Now updatable
     mapping(uint256 => uint256) public proposalTimelock;
+    mapping(uint256 => bool) public creatorVetoed;
+
     uint256 public treasuryTimelock = 7 days;
     uint256 public strategicTimelock = 14 days;
     uint256 public lockReductionTimelock = 14 days;
     uint256 public emergencyTimelock = 2 days;
+    uint256 public rewardsClaimerTimelock = 3 days;
 
-    // Emergency flag
     bool public emergencyPaused;
-
-    // Creator veto flag (limited use)
-    mapping(uint256 => bool) public creatorVetoed;
 
     // =============================================================
     // Events
@@ -142,7 +136,6 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         uint256 endTime,
         string description
     );
-
     event VoteCast(uint256 indexed proposalId, address indexed voter, bool support, uint256 votingPower);
     event ProposalExecution(uint256 indexed proposalId, address indexed executor);
     event ProposalCancellation(uint256 indexed proposalId, address indexed canceller);
@@ -150,6 +143,8 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     event GovernancePaused(address indexed executor);
     event GovernanceUnpaused(address indexed executor);
     event TimelockUpdated(uint8 indexed proposalType, uint256 newDuration);
+    event ProposalAutoFinalized(uint256 indexed proposalId, bool passed);
+    event RewardsDistributorSet(address indexed distributor);
 
     // =============================================================
     // Modifiers
@@ -167,13 +162,6 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
     modifier onlyGuardian() {
         if (!ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
-            revert NotAuthorized();
-        }
-        _;
-    }
-
-    modifier onlyExecutor() {
-        if (!ICentralAuthority(centralAuthority).hasRole(EXECUTOR_ROLE, msg.sender)) {
             revert NotAuthorized();
         }
         _;
@@ -224,6 +212,17 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     }
 
     // =============================================================
+    // Rewards Distributor Setup
+    // =============================================================
+
+    function setRewardsDistributor(address _rewardsDistributor) external {
+        if (msg.sender != factory) revert NotAuthorized();
+        if (_rewardsDistributor == address(0)) revert ZeroAddress();
+        rewardsDistributor = _rewardsDistributor;
+        emit RewardsDistributorSet(_rewardsDistributor);
+    }
+
+    // =============================================================
     // Proposal Management
     // =============================================================
 
@@ -234,17 +233,12 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     {
         if (target == address(0)) revert InvalidTarget();
         if (bytes(description).length == 0) revert InvalidProposalType();
-        if (proposalType > 3) revert InvalidProposalType();
+        if (proposalType > 4) revert InvalidProposalType();
 
-        if (proposalType == PROPOSAL_TYPE_TREASURY) {
-            if (target != treasuryVault) revert InvalidTarget();
-        } else if (proposalType == PROPOSAL_TYPE_STRATEGIC) {
-            if (target != strategicReserveVault) revert InvalidTarget();
-        }
+        _validateProposalTarget(target, proposalType);
 
         uint256 votingPower = IRevvFiBootstrapper(bootstrapper).shares(msg.sender);
         uint256 totalShares = IRevvFiBootstrapper(bootstrapper).totalShares();
-
         uint256 minThreshold = (totalShares * MIN_PROPOSAL_THRESHOLD_BPS) / BASIS_POINTS;
         if (votingPower < minThreshold) revert InsufficientProposingPower();
 
@@ -280,6 +274,17 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         return proposalCounter;
     }
 
+    function _validateProposalTarget(address target, uint8 proposalType) internal view {
+        if (proposalType == PROPOSAL_TYPE_TREASURY) {
+            if (target != treasuryVault) revert InvalidTarget();
+        } else if (proposalType == PROPOSAL_TYPE_STRATEGIC) {
+            if (target != strategicReserveVault) revert InvalidTarget();
+        } else if (proposalType == PROPOSAL_TYPE_REWARDS_CLAIMER) {
+            if (rewardsDistributor == address(0) || target != rewardsDistributor) revert InvalidTarget();
+        }
+        // LOCK_REDUCTION and EMERGENCY can target bootstrapper or other contracts
+    }
+
     function castVote(uint256 proposalId, bool support) external whenNotPaused proposalExists(proposalId) {
         Proposal storage proposal = proposals[proposalId];
 
@@ -300,11 +305,8 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         }
 
         emit VoteCast(proposalId, msg.sender, support, votingPower);
-        _checkAndFinalizeProposal(proposalId);
-    }
 
-    function _checkAndFinalizeProposal(uint256 proposalId) internal {
-        Proposal storage proposal = proposals[proposalId];
+        // Auto-finalize if voting period ended
         if (block.timestamp > proposal.endTime) {
             _finalizeProposal(proposalId);
         }
@@ -316,8 +318,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
         uint256 totalVotes = proposal.forVotes + proposal.againstVotes;
         uint256 threshold = _getApprovalThreshold(proposal.proposalType);
-        uint256 quorum = _getQuorumThreshold(proposal.proposalType);
-        uint256 quorumRequired = (proposal.totalVotingPowerAtStart * quorum) / BASIS_POINTS;
+        uint256 quorumRequired = (proposal.totalVotingPowerAtStart * MIN_QUORUM_BPS) / BASIS_POINTS;
 
         bool passed = false;
         if (totalVotes >= quorumRequired && totalVotes > 0) {
@@ -331,6 +332,8 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         } else {
             proposal.state = PROPOSAL_STATE_DEFEATED;
         }
+
+        emit ProposalAutoFinalized(proposalId, passed);
     }
 
     function executeProposal(uint256 proposalId) external nonReentrant whenNotPaused proposalExists(proposalId) {
@@ -354,9 +357,12 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     function cancelProposal(uint256 proposalId) external proposalExists(proposalId) {
         Proposal storage proposal = proposals[proposalId];
         if (proposal.state != PROPOSAL_STATE_ACTIVE) revert ProposalNotActive();
-        if (msg.sender != proposal.proposer && !ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+
+        if (msg.sender != proposal.proposer && !ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender))
+        {
             revert NotAuthorized();
         }
+
         proposal.cancelled = true;
         proposal.state = PROPOSAL_STATE_CANCELLED;
         emit ProposalCancellation(proposalId, msg.sender);
@@ -373,17 +379,37 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         emit ProposalVetoed(proposalId, msg.sender);
     }
 
+    // =============================================================
+    // Proposal Actions for Rewards Distributor
+    // =============================================================
+
+    function addRewardsClaimer(address claimer) external {
+        if (msg.sender != factory && !ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+            revert NotAuthorized();
+        }
+        if (rewardsDistributor == address(0)) revert RewardsDistributorError();
+        IRewardsDistributor(rewardsDistributor).addClaimer(claimer);
+    }
+
+    function removeRewardsClaimer(address claimer) external {
+        if (msg.sender != factory && !ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+            revert NotAuthorized();
+        }
+        if (rewardsDistributor == address(0)) revert RewardsDistributorError();
+        IRewardsDistributor(rewardsDistributor).removeClaimer(claimer);
+    }
+
+    // =============================================================
+    // Helper Functions
+    // =============================================================
+
     function _getApprovalThreshold(uint8 proposalType) internal pure returns (uint256) {
         if (proposalType == PROPOSAL_TYPE_TREASURY) return 6000;
         if (proposalType == PROPOSAL_TYPE_STRATEGIC) return 6600;
         if (proposalType == PROPOSAL_TYPE_LOCK_REDUCTION) return 7500;
         if (proposalType == PROPOSAL_TYPE_EMERGENCY) return 8000;
+        if (proposalType == PROPOSAL_TYPE_REWARDS_CLAIMER) return 6000;
         return 6000;
-    }
-
-    function _getQuorumThreshold(uint8 proposalType) internal pure returns (uint256) {
-        // All proposals require 60% of total shares to participate (minimum quorum)
-        return 6000; // 60% in basis points
     }
 
     function _getTimelockDuration(uint8 proposalType) internal view returns (uint256) {
@@ -391,8 +417,13 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         if (proposalType == PROPOSAL_TYPE_STRATEGIC) return strategicTimelock;
         if (proposalType == PROPOSAL_TYPE_LOCK_REDUCTION) return lockReductionTimelock;
         if (proposalType == PROPOSAL_TYPE_EMERGENCY) return emergencyTimelock;
+        if (proposalType == PROPOSAL_TYPE_REWARDS_CLAIMER) return rewardsClaimerTimelock;
         return 7 days;
     }
+
+    // =============================================================
+    // View Functions
+    // =============================================================
 
     function getProposal(uint256 proposalId) external view returns (Proposal memory) {
         return proposals[proposalId];
@@ -411,11 +442,33 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         Proposal storage proposal = proposals[proposalId];
         if (proposal.cancelled) return PROPOSAL_STATE_CANCELLED;
         if (proposal.executed) return PROPOSAL_STATE_EXECUTED;
-        if (proposal.state == PROPOSAL_STATE_SUCCEEDED) return PROPOSAL_STATE_SUCCEEDED;
-        if (proposal.state == PROPOSAL_STATE_DEFEATED) return PROPOSAL_STATE_DEFEATED;
-        if (block.timestamp < proposal.startTime) return PROPOSAL_STATE_PENDING;
-        if (block.timestamp <= proposal.endTime) return PROPOSAL_STATE_ACTIVE;
-        return PROPOSAL_STATE_PENDING;
+
+        // If proposal is still active but voting period ended, it should be finalized
+        if (proposal.state == PROPOSAL_STATE_ACTIVE && block.timestamp > proposal.endTime) {
+            return PROPOSAL_STATE_PENDING; // Indicates needs finalization
+        }
+
+        return proposal.state;
+    }
+
+    function getProposalFinalState(uint256 proposalId) public view returns (bool isFinalized, bool passed) {
+        Proposal storage proposal = proposals[proposalId];
+        if (proposal.state == PROPOSAL_STATE_SUCCEEDED) return (true, true);
+        if (proposal.state == PROPOSAL_STATE_DEFEATED) return (true, false);
+        if (proposal.state != PROPOSAL_STATE_ACTIVE) return (true, false);
+
+        uint256 totalVotes = proposal.forVotes + proposal.againstVotes;
+        uint256 threshold = _getApprovalThreshold(proposal.proposalType);
+        uint256 quorumRequired = (proposal.totalVotingPowerAtStart * MIN_QUORUM_BPS) / BASIS_POINTS;
+
+        if (block.timestamp > proposal.endTime) {
+            if (totalVotes >= quorumRequired && totalVotes > 0) {
+                uint256 approvalPercentage = (proposal.forVotes * BASIS_POINTS) / totalVotes;
+                return (true, approvalPercentage >= threshold);
+            }
+            return (true, false);
+        }
+        return (false, false);
     }
 
     function getVoteResults(uint256 proposalId)
@@ -443,8 +496,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
             passesThreshold = approvalPercentage >= _getApprovalThreshold(proposal.proposalType);
         }
 
-        uint256 quorumRequired =
-            (proposal.totalVotingPowerAtStart * _getQuorumThreshold(proposal.proposalType)) / BASIS_POINTS;
+        uint256 quorumRequired = (proposal.totalVotingPowerAtStart * MIN_QUORUM_BPS) / BASIS_POINTS;
         meetsQuorum = totalVotes >= quorumRequired;
     }
 
@@ -472,6 +524,10 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         return IRevvFiBootstrapper(bootstrapper).totalShares();
     }
 
+    // =============================================================
+    // Emergency Functions
+    // =============================================================
+
     function pause() external onlyGuardian {
         emergencyPaused = true;
         emit GovernancePaused(msg.sender);
@@ -484,56 +540,45 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
     function forceFinalizeProposal(uint256 proposalId) external onlyGuardian proposalExists(proposalId) {
         Proposal storage proposal = proposals[proposalId];
-        if (block.timestamp <= proposal.endTime) revert ProposalNotActive();
         if (proposal.state != PROPOSAL_STATE_ACTIVE) revert ProposalNotActive();
         _finalizeProposal(proposalId);
     }
 
     // =============================================================
-    // Timelock Update Functions (Guardian Only)
+    // Timelock Update Functions
     // =============================================================
 
-    /**
-     * @dev Updates the timelock duration for treasury proposals
-     * @param _newDuration New timelock duration in seconds
-     */
     function setTreasuryTimelock(uint256 _newDuration) external onlyGuardian {
         if (_newDuration == 0) revert InvalidProposalType();
         treasuryTimelock = _newDuration;
         emit TimelockUpdated(PROPOSAL_TYPE_TREASURY, _newDuration);
     }
 
-    /**
-     * @dev Updates the timelock duration for strategic reserve proposals
-     * @param _newDuration New timelock duration in seconds
-     */
     function setStrategicTimelock(uint256 _newDuration) external onlyGuardian {
         if (_newDuration == 0) revert InvalidProposalType();
         strategicTimelock = _newDuration;
         emit TimelockUpdated(PROPOSAL_TYPE_STRATEGIC, _newDuration);
     }
 
-    /**
-     * @dev Updates the timelock duration for lock reduction proposals
-     * @param _newDuration New timelock duration in seconds
-     */
     function setLockReductionTimelock(uint256 _newDuration) external onlyGuardian {
         if (_newDuration == 0) revert InvalidProposalType();
         lockReductionTimelock = _newDuration;
         emit TimelockUpdated(PROPOSAL_TYPE_LOCK_REDUCTION, _newDuration);
     }
 
-    /**
-     * @dev Updates the timelock duration for emergency proposals
-     * @param _newDuration New timelock duration in seconds
-     */
     function setEmergencyTimelock(uint256 _newDuration) external onlyGuardian {
         if (_newDuration == 0) revert InvalidProposalType();
         emergencyTimelock = _newDuration;
         emit TimelockUpdated(PROPOSAL_TYPE_EMERGENCY, _newDuration);
     }
 
+    function setRewardsClaimerTimelock(uint256 _newDuration) external onlyGuardian {
+        if (_newDuration == 0) revert InvalidProposalType();
+        rewardsClaimerTimelock = _newDuration;
+        emit TimelockUpdated(PROPOSAL_TYPE_REWARDS_CLAIMER, _newDuration);
+    }
+
     function onSharesUpdated(address lp, uint256 newShares) external onlyBootstrapper {
-        emit VoteCast(0, lp, false, newShares);
+        // Pure hook - no state changes needed
     }
 }

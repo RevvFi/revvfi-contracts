@@ -349,7 +349,8 @@ contract StrategicReserveVault is ReentrancyGuard, AccessControl {
         ReleaseProposal storage proposal = proposals[proposalId];
 
         // Only proposer or guardian can cancel
-        if (msg.sender != proposal.proposer && !ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+        if (msg.sender != proposal.proposer && !ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender))
+        {
             revert NotAuthorized();
         }
 
@@ -371,7 +372,10 @@ contract StrategicReserveVault is ReentrancyGuard, AccessControl {
         uint256 quarterStart = (block.timestamp / QUARTER_SECONDS) * QUARTER_SECONDS;
 
         // Check if we already have a quarter for this period
-        if (quarterlyReleases[quarterCounter].quarterStart == 0 || quarterlyReleases[quarterCounter].quarterStart != quarterStart) {
+        if (
+            quarterlyReleases[quarterCounter].quarterStart == 0
+                || quarterlyReleases[quarterCounter].quarterStart != quarterStart
+        ) {
             quarterCounter++;
             quarterlyReleases[quarterCounter] = QuarterlyRelease({quarterStart: quarterStart, amountReleased: 0});
             emit QuarterlyReset(quarterCounter, quarterStart, 0);
@@ -386,7 +390,10 @@ contract StrategicReserveVault is ReentrancyGuard, AccessControl {
         uint256 currentQuarter = (block.timestamp / QUARTER_SECONDS) * QUARTER_SECONDS;
 
         // Check if we need to start a new quarter
-        if (quarterlyReleases[quarterCounter].quarterStart == 0 || quarterlyReleases[quarterCounter].quarterStart != currentQuarter) {
+        if (
+            quarterlyReleases[quarterCounter].quarterStart == 0
+                || quarterlyReleases[quarterCounter].quarterStart != currentQuarter
+        ) {
             quarterCounter++;
             quarterlyReleases[quarterCounter] = QuarterlyRelease({quarterStart: currentQuarter, amountReleased: 0});
             emit QuarterlyReset(quarterCounter, currentQuarter, 0);

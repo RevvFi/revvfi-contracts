@@ -308,7 +308,8 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
         ReleaseProposal storage proposal = proposals[proposalId];
 
         // Only proposer or guardian can cancel
-        if (msg.sender != proposal.proposer && !ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+        if (msg.sender != proposal.proposer && !ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender))
+        {
             revert NotAuthorized();
         }
 
