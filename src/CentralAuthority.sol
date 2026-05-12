@@ -104,17 +104,17 @@ contract CentralAuthority is Initializable, AccessControlUpgradeable {
      */
     function authorizeContract(address contractAddress, bytes32 role) external {
         if (contractAddress == address(0)) revert ZeroAddress();
-        
+
         bool isDAO = hasRole(DAO_ROLE, msg.sender);
         bool isFactory = hasRole(FACTORY_ROLE, msg.sender);
-        
+
         if (!isDAO && !isFactory) revert UnauthorizedRole();
-        
+
         // If called by factory, restrict to whitelisted roles
         if (isFactory && !isDAO) {
             if (!isFactoryAuthorizedRole[role]) revert UnauthorizedRole();
         }
-        
+
         _grantRole(role, contractAddress);
         emit ContractAuthorized(contractAddress, role);
     }
@@ -125,14 +125,14 @@ contract CentralAuthority is Initializable, AccessControlUpgradeable {
     function deauthorizeContract(address contractAddress, bytes32 role) external {
         bool isDAO = hasRole(DAO_ROLE, msg.sender);
         bool isFactory = hasRole(FACTORY_ROLE, msg.sender);
-        
+
         if (!isDAO && !isFactory) revert UnauthorizedRole();
-        
+
         // If called by factory, restrict to whitelisted roles (same as authorization)
         if (isFactory && !isDAO) {
             if (!isFactoryAuthorizedRole[role]) revert UnauthorizedRole();
         }
-        
+
         _revokeRole(role, contractAddress);
         emit ContractDeauthorized(contractAddress, role);
     }
@@ -145,17 +145,17 @@ contract CentralAuthority is Initializable, AccessControlUpgradeable {
 
     function setFactory(address newFactory) external onlyRole(DAO_ROLE) {
         if (newFactory == address(0)) revert ZeroAddress();
-        
+
         address oldFactory = currentFactory;
-        
+
         // Revoke old factory role if exists
         if (oldFactory != address(0)) {
             _revokeRole(FACTORY_ROLE, oldFactory);
         }
-        
+
         currentFactory = newFactory;
         _grantRole(FACTORY_ROLE, newFactory);
-        
+
         emit FactoryUpdated(oldFactory, newFactory);
     }
 
@@ -178,7 +178,7 @@ contract CentralAuthority is Initializable, AccessControlUpgradeable {
     function removeFactoryAuthorizedRole(bytes32 role) external onlyRole(DAO_ROLE) {
         if (isFactoryAuthorizedRole[role]) {
             isFactoryAuthorizedRole[role] = false;
-            
+
             // Remove from array (inefficient but admin function, called rarely)
             for (uint256 i = 0; i < factoryAuthorizedRoles.length; i++) {
                 if (factoryAuthorizedRoles[i] == role) {
@@ -187,7 +187,7 @@ contract CentralAuthority is Initializable, AccessControlUpgradeable {
                     break;
                 }
             }
-            
+
             emit FactoryAuthorizedRoleRemoved(role);
         }
     }

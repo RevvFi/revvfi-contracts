@@ -4,15 +4,8 @@ pragma solidity 0.8.33;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "./interfaces/ICentralAuthority.sol";
 
-/**
- * @title CreatorVestingVault
- * @dev Holds creator's allocated tokens and releases them according to cliff + linear vesting schedule.
- * @dev This contract is NON-UPGRADEABLE by design for maximum trust.
- * @dev Creator cannot access tokens before cliff. After cliff, tokens unlock linearly over vesting period.
- */
 contract CreatorVestingVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -30,23 +23,22 @@ contract CreatorVestingVault is ReentrancyGuard {
     error InvalidAmount();
     error NothingToRelease();
     error NotInitialized();
+    error InsufficientBalance();
+    error CannotRecoverOwedTokens();
 
     // =============================================================
     // Structs
     // =============================================================
 
-    /**
-     * @dev Vesting schedule configuration
-     */
     struct VestingSchedule {
-        address token; // Token being vested
-        address beneficiary; // Creator address receiving tokens
-        uint256 cliffDuration; // Seconds until first release
-        uint256 vestingDuration; // Total vesting period after cliff (seconds)
-        uint256 startTime; // Timestamp when vesting begins (launch time)
-        uint256 totalAmount; // Total tokens allocated to creator
-        uint256 releasedAmount; // Tokens already claimed
-        bool initialized; // Whether schedule is initialized
+        address token;
+        address beneficiary;
+        uint256 cliffDuration;
+        uint256 vestingDuration;
+        uint256 startTime;
+        uint256 totalAmount;
+        uint256 releasedAmount;
+        bool initialized;
     }
 
     // =============================================================
@@ -54,24 +46,14 @@ contract CreatorVestingVault is ReentrancyGuard {
     // =============================================================
 
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
-    bytes32 public constant VAULT_ROLE = keccak256("VAULT_ROLE");
 
     // =============================================================
     // State Variables
     // =============================================================
 
     VestingSchedule private _vestingSchedule;
-
-    // Address that can update vesting parameters (factory/guardian)
     address public immutable factory;
-
-    // Central authority for role management
     address public immutable centralAuthority;
-
-    // Platform fee recipient for potential clawback (emergency only)
-    address public immutable platformFeeRecipient;
-
-    // Emergency flag - if true, vesting can be paused (only by guardian in extreme cases)
     bool public emergencyPaused;
 
     // =============================================================
@@ -125,13 +107,11 @@ contract CreatorVestingVault is ReentrancyGuard {
     // Constructor
     // =============================================================
 
-    constructor(address _factory, address _platformFeeRecipient, address _centralAuthority) {
+    constructor(address _factory, address _centralAuthority) {
         if (_factory == address(0)) revert ZeroAddress();
-        if (_platformFeeRecipient == address(0)) revert ZeroAddress();
         if (_centralAuthority == address(0)) revert ZeroAddress();
 
         factory = _factory;
-        platformFeeRecipient = _platformFeeRecipient;
         centralAuthority = _centralAuthority;
         emergencyPaused = false;
     }
@@ -140,15 +120,6 @@ contract CreatorVestingVault is ReentrancyGuard {
     // Initialization Functions
     // =============================================================
 
-    /**
-     * @dev Initializes vesting schedule (called by factory)
-     * @param token Token address
-     * @param beneficiary Creator address
-     * @param totalAmount Total tokens to vest
-     * @param cliffDuration Cliff duration in seconds
-     * @param vestingDuration Vesting duration in seconds
-     * @param startTime Start time (launch timestamp)
-     */
     function initializeVesting(
         address token,
         address beneficiary,
@@ -165,8 +136,8 @@ contract CreatorVestingVault is ReentrancyGuard {
         if (startTime == 0) revert ZeroAddress();
         if (cliffDuration > vestingDuration) revert InvalidDuration();
 
-        // Transfer tokens to this contract
-        IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        if (balance < totalAmount) revert InsufficientBalance();
 
         _vestingSchedule = VestingSchedule({
             token: token,
@@ -186,10 +157,6 @@ contract CreatorVestingVault is ReentrancyGuard {
     // Core Functions
     // =============================================================
 
-    /**
-     * @dev Releases claimable tokens to beneficiary
-     * @return amount Amount of tokens released
-     */
     function release() external nonReentrant onlyBeneficiary whenNotPaused returns (uint256 amount) {
         if (!_vestingSchedule.initialized) revert NotInitialized();
 
@@ -211,10 +178,6 @@ contract CreatorVestingVault is ReentrancyGuard {
         return claimableAmount;
     }
 
-    /**
-     * @dev Gets currently claimable amount
-     * @return amount Claimable tokens
-     */
     function getClaimableAmount() public view returns (uint256 amount) {
         if (!_vestingSchedule.initialized) {
             return 0;
@@ -222,21 +185,22 @@ contract CreatorVestingVault is ReentrancyGuard {
 
         VestingSchedule memory schedule = _vestingSchedule;
 
-        // Before cliff: nothing claimable
-        if (block.timestamp < schedule.startTime + schedule.cliffDuration) {
+        if (block.timestamp < schedule.startTime) {
             return 0;
         }
 
-        // After full vesting: claim all remaining
-        if (block.timestamp >= schedule.startTime + schedule.cliffDuration + schedule.vestingDuration) {
+        uint256 totalElapsed = block.timestamp - schedule.startTime;
+
+        if (totalElapsed < schedule.cliffDuration) {
+            return 0;
+        }
+
+        if (totalElapsed >= schedule.vestingDuration) {
             return schedule.totalAmount - schedule.releasedAmount;
         }
 
-        // During vesting: calculate linear release
-        uint256 elapsed = block.timestamp - (schedule.startTime + schedule.cliffDuration);
-        uint256 vestedTotal = (schedule.totalAmount * elapsed) / schedule.vestingDuration;
+        uint256 vestedTotal = (schedule.totalAmount * totalElapsed) / schedule.vestingDuration;
 
-        // Subtract already released
         if (vestedTotal > schedule.releasedAmount) {
             return vestedTotal - schedule.releasedAmount;
         }
@@ -244,10 +208,6 @@ contract CreatorVestingVault is ReentrancyGuard {
         return 0;
     }
 
-    /**
-     * @dev Returns total vested amount at current time
-     * @return totalVested Total tokens vested so far
-     */
     function getTotalVested() public view returns (uint256 totalVested) {
         if (!_vestingSchedule.initialized) {
             return 0;
@@ -255,45 +215,49 @@ contract CreatorVestingVault is ReentrancyGuard {
 
         VestingSchedule memory schedule = _vestingSchedule;
 
-        if (block.timestamp < schedule.startTime + schedule.cliffDuration) {
+        if (block.timestamp < schedule.startTime) {
             return 0;
         }
 
-        if (block.timestamp >= schedule.startTime + schedule.cliffDuration + schedule.vestingDuration) {
+        uint256 totalElapsed = block.timestamp - schedule.startTime;
+
+        if (totalElapsed >= schedule.vestingDuration) {
             return schedule.totalAmount;
         }
 
-        uint256 elapsed = block.timestamp - (schedule.startTime + schedule.cliffDuration);
-        return (schedule.totalAmount * elapsed) / schedule.vestingDuration;
+        if (totalElapsed < schedule.cliffDuration) {
+            return 0;
+        }
+
+        return (schedule.totalAmount * totalElapsed) / schedule.vestingDuration;
     }
 
-    /**
-     * @dev Returns remaining locked tokens
-     * @return remaining Tokens still locked
-     */
     function getRemainingLocked() public view returns (uint256 remaining) {
         if (!_vestingSchedule.initialized) {
             return 0;
         }
-
         return _vestingSchedule.totalAmount - getTotalVested();
+    }
+
+    /**
+     * @dev Returns total amount that is OWED to beneficiary (including vested but unclaimed)
+     */
+    function getOwedAmount() public view returns (uint256 owed) {
+        if (!_vestingSchedule.initialized) {
+            return 0;
+        }
+        return _vestingSchedule.totalAmount - _vestingSchedule.releasedAmount;
     }
 
     // =============================================================
     // Emergency Functions (Guardian Only)
     // =============================================================
 
-    /**
-     * @dev Pauses vesting releases (emergency only)
-     */
     function pause() external onlyGuardian {
         emergencyPaused = true;
         emit VestingPaused(msg.sender);
     }
 
-    /**
-     * @dev Unpauses vesting releases
-     */
     function unpause() external onlyGuardian {
         emergencyPaused = false;
         emit VestingUnpaused(msg.sender);
@@ -301,21 +265,19 @@ contract CreatorVestingVault is ReentrancyGuard {
 
     /**
      * @dev Recovers any tokens sent to this contract by mistake (guardian only)
-     * @param token Token address to recover
-     * @param amount Amount to recover
-     * @param recipient Recipient address
+     * CRITICAL: Cannot recover tokens that are OWED to beneficiary (including vested but unclaimed)
+     * Only excess tokens beyond the total owed amount can be recovered
      */
     function recoverTokens(address token, uint256 amount, address recipient) external onlyGuardian {
         if (token == address(0)) revert ZeroAddress();
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0) revert InvalidAmount();
 
-        // Cannot recover the vested token if it's still locked
         if (token == _vestingSchedule.token) {
-            uint256 remainingLocked = getRemainingLocked();
+            uint256 owedAmount = getOwedAmount();
             uint256 contractBalance = IERC20(token).balanceOf(address(this));
-            uint256 recoverable = contractBalance - remainingLocked;
-            if (amount > recoverable) revert InvalidAmount();
+            uint256 recoverable = contractBalance - owedAmount;
+            if (amount > recoverable) revert CannotRecoverOwedTokens();
         }
 
         IERC20(token).safeTransfer(recipient, amount);
@@ -326,9 +288,6 @@ contract CreatorVestingVault is ReentrancyGuard {
     // View Functions
     // =============================================================
 
-    /**
-     * @dev Returns vesting schedule details
-     */
     function getVestingSchedule()
         external
         view
@@ -356,9 +315,6 @@ contract CreatorVestingVault is ReentrancyGuard {
         );
     }
 
-    /**
-     * @dev Returns contract balance of vested token
-     */
     function getContractBalance() external view returns (uint256) {
         if (!_vestingSchedule.initialized) {
             return 0;
@@ -366,20 +322,13 @@ contract CreatorVestingVault is ReentrancyGuard {
         return IERC20(_vestingSchedule.token).balanceOf(address(this));
     }
 
-    /**
-     * @dev Checks if vesting is fully completed
-     */
     function isFullyVested() external view returns (bool) {
         if (!_vestingSchedule.initialized) {
             return false;
         }
-        return block.timestamp
-            >= _vestingSchedule.startTime + _vestingSchedule.cliffDuration + _vestingSchedule.vestingDuration;
+        return block.timestamp >= _vestingSchedule.startTime + _vestingSchedule.vestingDuration;
     }
 
-    /**
-     * @dev Checks if vesting is still in cliff period
-     */
     function isInCliff() external view returns (bool) {
         if (!_vestingSchedule.initialized) {
             return false;
@@ -387,4 +336,3 @@ contract CreatorVestingVault is ReentrancyGuard {
         return block.timestamp < _vestingSchedule.startTime + _vestingSchedule.cliffDuration;
     }
 }
-// Interface moved to interfaces/ICreatorVestingVault.sol

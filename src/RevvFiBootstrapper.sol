@@ -20,11 +20,6 @@ import "./interfaces/IRewardDistributor.sol";
 import "./interfaces/IRevvFiFactory.sol";
 import "./interfaces/ICentralAuthority.sol";
 
-/**
- * @title RevvFiBootstrapper
- * @notice Core contract per launch. Holds ETH, tracks LP shares, creates Uniswap pool.
- * @dev IMMUTABLE AFTER DEPLOYMENT - all critical addresses set in initialize and cannot change
- */
 contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, PausableUpgradeable {
     using SafeERC20 for IERC20;
 
@@ -36,6 +31,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     error ZeroDeposit();
     error HardCapExceeded();
     error TargetNotMet();
+    error TargetReached();
     error AlreadyLaunched();
     error AlreadyFailed();
     error NotLaunched();
@@ -57,6 +53,9 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     error CannotRescueCoreToken();
     error InsufficientTokenBalance();
     error UnexpectedTokenBalance();
+    error InvalidFactoryCaller();
+    error GovernanceCallbackFail();
+    error DivisionByZero();
 
     // =============================================================
     // Constants
@@ -64,10 +63,10 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
     uint256 public constant PRECISION = 1e18;
     uint256 public constant DEADLINE_BUFFER = 300;
-    uint256 public constant MIN_WITHDRAWAL_SHARES = 1e15; // Minimum 0.001 ETH worth of shares
+    uint256 public constant MIN_WITHDRAWAL_SHARES = 1e15;
 
     // =============================================================
-    // Role Constants (for Central Authority)
+    // Role Constants
     // =============================================================
 
     bytes32 public constant DAO_ROLE = keccak256("DAO_ROLE");
@@ -141,8 +140,6 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     uint256 public maturityTime;
 
     bool public rewardsInitialized;
-
-    // Expected token balance to prevent manipulation
     uint256 public expectedTokenBalance;
 
     // =============================================================
@@ -160,6 +157,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     event VestingVaultInitialized(address indexed vault, address creator, uint256 amount);
     event TokensTransferredToVault(address indexed vault, uint256 amount);
     event TokensRescued(address indexed token, uint256 amount, address indexed recipient);
+    event GovernanceCallbackFailed(address indexed governance, address indexed lp, uint256 shares);
 
     // =============================================================
     // Modifiers
@@ -244,7 +242,10 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         __ReentrancyGuard_init();
         __Pausable_init();
 
-        // Validate all required addresses
+        if (!ICentralAuthority(_centralAuthority).hasRole(FACTORY_ROLE, msg.sender)) {
+            revert InvalidFactoryCaller();
+        }
+
         if (_creator == address(0)) revert ZeroAddress();
         if (_revvToken == address(0)) revert ZeroAddress();
         if (_weth == address(0)) revert ZeroAddress();
@@ -258,7 +259,6 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         if (_launchId == 0) revert ZeroAddress();
         if (_centralAuthority == address(0)) revert ZeroAddress();
 
-        // Set immutable core config
         creator = _creator;
         revvToken = _revvToken;
         weth = _weth;
@@ -268,28 +268,24 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         launchId = _launchId;
         centralAuthority = _centralAuthority;
 
-        // Set token allocations
         liquidityAllocation = _liquidityAllocation;
         creatorVestingAmount = _creatorVestingAmount;
         treasuryAmount = _treasuryAmount;
         strategicReserveAmount = _strategicReserveAmount;
         rewardsAmount = _rewardsAmount;
 
-        // Calculate expected token balance
-        expectedTokenBalance = _liquidityAllocation + _creatorVestingAmount + _treasuryAmount + _strategicReserveAmount + _rewardsAmount;
+        expectedTokenBalance =
+            _liquidityAllocation + _creatorVestingAmount + _treasuryAmount + _strategicReserveAmount + _rewardsAmount;
 
-        // Set raise targets and timings
         targetLiquidityETH = _targetLiquidityETH;
         hardCapETH = _hardCapETH;
         raiseEndTime = block.timestamp + _raiseWindowDuration;
         lockDuration = _lockDuration;
         keeperReward = _keeperReward;
 
-        // Set vesting parameters
         creatorCliffDuration = _creatorCliffDuration;
         creatorVestingDuration = _creatorVestingDuration;
 
-        // Set vault addresses
         creatorVestingVault = _creatorVestingVault;
         treasuryVault = _treasuryVault;
         strategicReserveVault = _strategicReserveVault;
@@ -298,18 +294,11 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
         rewardsInitialized = false;
 
-        // Verify token balance
         uint256 actualBalance = IERC20(revvToken).balanceOf(address(this));
-        if (actualBalance != expectedTokenBalance) revert InsufficientTokenBalance();
+        if (actualBalance < expectedTokenBalance) revert InsufficientTokenBalance();
 
-        // Safe approve for Uniswap router
         _safeApprove(revvToken, uniswapRouter, type(uint256).max);
-        _safeApprove(weth, uniswapRouter, type(uint256).max);
     }
-
-    // =============================================================
-    // Safe Approval Helper
-    // =============================================================
 
     function _safeApprove(address token, address spender, uint256 amount) internal {
         IERC20(token).approve(spender, 0);
@@ -338,14 +327,12 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     // Launch - Permissionless
     // =============================================================
 
-    function launch() external nonReentrant onlyLaunchPhase {
+    function launch() external nonReentrant whenNotPaused onlyLaunchPhase {
         if (totalDepositedETH < targetLiquidityETH) revert TargetNotMet();
 
-        // Verify token balance hasn't been manipulated
         uint256 currentBalance = IERC20(revvToken).balanceOf(address(this));
-        if (currentBalance != expectedTokenBalance) revert UnexpectedTokenBalance();
+        if (currentBalance < expectedTokenBalance) revert UnexpectedTokenBalance();
 
-        // Reserve keeper reward BEFORE adding liquidity
         uint256 ethForLiquidity = totalDepositedETH;
         if (keeperReward > 0) {
             if (totalDepositedETH <= keeperReward) revert InsufficientETHForLiquidity();
@@ -354,28 +341,19 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
         maturityTime = raiseEndTime + lockDuration;
 
-        // Transfer tokens to vaults BEFORE initializing vesting
         _transferToVaults();
-
-        // Now initialize creator vesting (tokens are already in vault)
         _initializeVestingVault();
-
-        // Initialize rewards distributor schedule
         _initializeRewardsDistributor();
-
-        // Add liquidity to Uniswap with remaining ETH
         _addLiquidityWithAmount(ethForLiquidity);
 
         launched = true;
 
-        // Pay keeper reward to caller
         if (keeperReward > 0) {
             (bool sent,) = msg.sender.call{value: keeperReward}("");
             if (!sent) revert KeeperRewardFailed();
             emit KeeperRewardPaid(msg.sender, keeperReward);
         }
 
-        // Notify factory of successful launch
         if (factory != address(0)) {
             IRevvFiFactory(factory).updateLaunchSuccess(launchId, maturityTime);
         }
@@ -387,9 +365,9 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     // Mark Failed & Refunds
     // =============================================================
 
-    function markFailed() external nonReentrant onlyLaunchPhase {
+    function markFailed() external nonReentrant whenNotPaused onlyLaunchPhase {
         if (block.timestamp <= raiseEndTime) revert RaiseNotEnded();
-        if (totalDepositedETH >= targetLiquidityETH) revert TargetNotMet();
+        if (totalDepositedETH >= targetLiquidityETH) revert TargetReached();
         if (failed) revert AlreadyFailed();
 
         failed = true;
@@ -423,11 +401,8 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
     function withdrawAsAssets(uint256 shareAmount) external nonReentrant afterLaunch whenNotPaused {
         if (block.timestamp < maturityTime) revert WithdrawLocked();
-        
-        // Prevent dust withdrawals that could cause rounding issues
         if (shareAmount < MIN_WITHDRAWAL_SHARES) revert InsufficientShareAmount();
         if (shareAmount > shares[msg.sender]) revert InvalidShareAmount();
-
         if (totalShares == 0) revert InvalidShareAmount();
 
         uint256 fraction = (shareAmount * PRECISION) / totalShares;
@@ -435,26 +410,36 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
         if (lpToRemove == 0) revert InsufficientShareAmount();
 
-        (uint256 ethOut, uint256 tokenOut) = _removeLiquidity(lpToRemove);
+        // CRITICAL FIX: Store previous LP amount BEFORE mutation to avoid division by zero
+        uint256 previousLP = uniLPTokenAmount;
+        if (previousLP == 0) revert DivisionByZero();
 
-        // Update state before transfers
+        // Calculate token reduction using PREVIOUS LP amount
+        uint256 tokenReduction = (lpToRemove * liquidityAllocation) / previousLP;
+
+        // CEI Pattern: Update state BEFORE external call
         shares[msg.sender] -= shareAmount;
         totalShares -= shareAmount;
         uniLPTokenAmount -= lpToRemove;
-        expectedTokenBalance -= tokenOut;
+        expectedTokenBalance -= tokenReduction;
 
-        // Notify governance
+        // Now external calls
+        (uint256 ethOut, uint256 tokenOut) = _removeLiquidity(lpToRemove);
+
         if (governanceModule != address(0)) {
-            try IRevvFiGovernance(governanceModule).onSharesUpdated(msg.sender, shares[msg.sender]) {} catch {}
+            try IRevvFiGovernance(governanceModule).onSharesUpdated(msg.sender, shares[msg.sender]) {
+            // Success
+            }
+            catch {
+                emit GovernanceCallbackFailed(governanceModule, msg.sender, shares[msg.sender]);
+            }
         }
 
-        // Transfer ETH
         if (ethOut > 0) {
             (bool ok,) = msg.sender.call{value: ethOut}("");
             if (!ok) revert RefundFailed();
         }
 
-        // Transfer tokens
         if (tokenOut > 0) {
             IERC20(revvToken).safeTransfer(msg.sender, tokenOut);
         }
@@ -463,8 +448,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     }
 
     // =============================================================
-    // Emergency Token Rescue (Guardian only after maturity)
-    // Only allows rescue of tokens that are NOT core protocol assets
+    // Emergency Token Rescue
     // =============================================================
 
     function rescueTokens(address token, uint256 amount, address recipient) external onlyGuardian {
@@ -472,12 +456,10 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0) revert InvalidShareAmount();
 
-        // CRITICAL: Never allow rescue of core protocol assets
         if (token == revvToken) revert CannotRescueCoreToken();
         if (token == uniswapPair) revert CannotRescueCoreToken();
         if (token == address(this)) revert CannotRescueCoreToken();
 
-        // Also prevent rescuing WETH if it's part of the LP position
         if (token == weth) {
             if (uniLPTokenAmount > 0 && IERC20(uniswapPair).balanceOf(address(this)) > 0) {
                 revert CannotRescueCoreToken();
@@ -498,7 +480,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     function _addLiquidityWithAmount(uint256 ethAmount) internal {
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapRouter);
 
-        _createLPPair();
+        _ensureLPPairExists();
 
         uint256 minTokenAmount = (liquidityAllocation * 95) / 100;
         uint256 minETHAmount = (ethAmount * 95) / 100;
@@ -514,31 +496,20 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
         if (liquidity == 0) revert LiquidityAddFailed();
         uniLPTokenAmount = liquidity;
-
-        // Update expected balance after token transfer to Uniswap
         expectedTokenBalance -= liquidityAllocation;
-
-        address factoryAddr = router.factory();
-        address pair = IUniswapV2Factory(factoryAddr).getPair(revvToken, weth);
-
-        if (pair == address(0)) revert PairNotFound();
-        uniswapPair = pair;
     }
 
-    function _createLPPair() internal {
+    function _ensureLPPairExists() internal {
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapRouter);
         address factoryAddr = router.factory();
         IUniswapV2Factory uniswapFactory = IUniswapV2Factory(factoryAddr);
 
-        address existingPair = uniswapFactory.getPair(revvToken, weth);
-        
-        if (existingPair == address(0)) {
-            address newPair = uniswapFactory.createPair(revvToken, weth);
-            if (newPair == address(0)) revert PairNotFound();
-            uniswapPair = newPair;
-        } else {
-            uniswapPair = existingPair;
+        address pair = uniswapFactory.getPair(revvToken, weth);
+        if (pair == address(0)) {
+            pair = uniswapFactory.createPair(revvToken, weth);
+            if (pair == address(0)) revert PairNotFound();
         }
+        uniswapPair = pair;
     }
 
     function _removeLiquidity(uint256 lpAmount) internal returns (uint256 ethOut, uint256 tokenOut) {
@@ -553,26 +524,21 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     function _transferToVaults() internal {
         IERC20 token = IERC20(revvToken);
 
-        // Transfer to Treasury Vault
         if (treasuryAmount > 0 && treasuryVault != address(0)) {
             token.safeTransfer(treasuryVault, treasuryAmount);
             emit TokensTransferredToVault(treasuryVault, treasuryAmount);
         }
 
-        // Transfer to Strategic Reserve Vault
         if (strategicReserveAmount > 0 && strategicReserveVault != address(0)) {
             token.safeTransfer(strategicReserveVault, strategicReserveAmount);
             emit TokensTransferredToVault(strategicReserveVault, strategicReserveAmount);
         }
 
-        // Transfer to Rewards Distributor
         if (rewardsAmount > 0 && rewardsDistributor != address(0)) {
             token.safeTransfer(rewardsDistributor, rewardsAmount);
             emit TokensTransferredToVault(rewardsDistributor, rewardsAmount);
         }
 
-        // Note: Creator Vesting Vault tokens transferred later in _initializeVestingVault
-        // to avoid double counting
         if (creatorVestingAmount > 0 && creatorVestingVault != address(0)) {
             token.safeTransfer(creatorVestingVault, creatorVestingAmount);
             emit TokensTransferredToVault(creatorVestingVault, creatorVestingAmount);
@@ -581,15 +547,16 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
     function _initializeVestingVault() internal {
         if (creatorVestingAmount > 0 && creatorVestingVault != address(0)) {
-            ICreatorVestingVault(creatorVestingVault).initializeVesting(
-                revvToken,
-                creator,
-                creatorVestingAmount,
-                creatorCliffDuration,
-                creatorVestingDuration,
-                block.timestamp
-            );
-            
+            ICreatorVestingVault(creatorVestingVault)
+                .initializeVesting(
+                    revvToken,
+                    creator,
+                    creatorVestingAmount,
+                    creatorCliffDuration,
+                    creatorVestingDuration,
+                    block.timestamp
+                );
+
             emit VestingVaultInitialized(creatorVestingVault, creator, creatorVestingAmount);
         }
     }
@@ -635,17 +602,10 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     }
 
     // =============================================================
-    // Receive ETH - restricted to prevent unexpected balance inflation
+    // Receive ETH
     // =============================================================
 
-    receive() external payable {
-        // Only allow ETH from Uniswap during withdrawals or during launch phase
-        if (!launched && !failed && block.timestamp <= raiseEndTime) {
-            // During launch phase, only accept ETH from depositETH function
-            revert ZeroDeposit();
-        }
-        // After launch, ETH from Uniswap LP removal is allowed
-    }
+    receive() external payable {}
 
     uint256[46] private __gap;
 }

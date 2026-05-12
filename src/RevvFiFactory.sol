@@ -57,7 +57,13 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
     // =============================================================
 
     event FeeTransferFailed(address indexed recipient, uint256 amount);
-    event LaunchCreated(uint256 indexed launchId, address indexed bootstrapper, address indexed creator, uint256 targetLiquidityETH, uint256 raiseEndTime);
+    event LaunchCreated(
+        uint256 indexed launchId,
+        address indexed bootstrapper,
+        address indexed creator,
+        uint256 targetLiquidityETH,
+        uint256 raiseEndTime
+    );
     event LaunchSucceeded(uint256 indexed launchId, address indexed bootstrapper, uint256 maturityTime);
     event BootstrapperImplementationUpdated(address indexed oldImplementation, address indexed newImplementation);
     event FeeRecipientUpdated(address indexed newRecipient);
@@ -294,9 +300,7 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
 
         // Deploy token AFTER bootstrapper is deployed - token mints to bootstrapper
         address token = ITokenTemplateFactory(tokenTemplateFactory)
-            .deployToken(
-                config.tokenName, config.tokenSymbol, config.totalSupply, config.templateId, bootstrapperAddr
-            );
+            .deployToken(config.tokenName, config.tokenSymbol, config.totalSupply, config.templateId, bootstrapperAddr);
         if (token == address(0)) revert DeploymentFailed();
 
         // Verify token was minted to bootstrapper correctly
@@ -308,7 +312,8 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         address treasuryVault = _deployTreasuryVault(token);
         address strategicReserveVault = _deployStrategicReserveVault(token);
         address rewardsDistributor = _deployRewardsDistributor(token);
-        address governanceModule = _deployGovernanceModule(bootstrapperAddr, treasuryVault, strategicReserveVault, msg.sender);
+        address governanceModule =
+            _deployGovernanceModule(bootstrapperAddr, treasuryVault, strategicReserveVault, msg.sender);
 
         // Record metadata
         bootstrapperCount++;
@@ -328,43 +333,49 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         isDeployed[bootstrapperAddr] = true;
 
         // Initialize bootstrapper
-        IRevvFiBootstrapper(bootstrapperAddr).initialize(
-            msg.sender,
-            token,
-            weth,
-            uniswapRouter,
-            config.liquidityAllocation,
-            config.targetLiquidityETH,
-            config.hardCapETH,
-            config.raiseWindowDuration,
-            config.lockDuration,
-            config.creatorVestingAmount,
-            config.treasuryAmount,
-            config.strategicReserveAmount,
-            config.rewardsAmount,
-            config.creatorCliffDuration,
-            config.creatorVestingDuration,
-            platformFeeRecipient,
-            keeperReward,
-            creatorVestingVault,
-            treasuryVault,
-            strategicReserveVault,
-            rewardsDistributor,
-            governanceModule,
-            launchId,
-            centralAuthority
-        );
+        IRevvFiBootstrapper(bootstrapperAddr)
+            .initialize(
+                msg.sender,
+                token,
+                weth,
+                uniswapRouter,
+                config.liquidityAllocation,
+                config.targetLiquidityETH,
+                config.hardCapETH,
+                config.raiseWindowDuration,
+                config.lockDuration,
+                config.creatorVestingAmount,
+                config.treasuryAmount,
+                config.strategicReserveAmount,
+                config.rewardsAmount,
+                config.creatorCliffDuration,
+                config.creatorVestingDuration,
+                platformFeeRecipient,
+                keeperReward,
+                creatorVestingVault,
+                treasuryVault,
+                strategicReserveVault,
+                rewardsDistributor,
+                governanceModule,
+                launchId,
+                centralAuthority
+            );
 
         // Initialize vaults with governance
         ITreasuryVault(treasuryVault).initializeGovernance(governanceModule);
         IStrategicReserveVault(strategicReserveVault).initializeGovernance(governanceModule);
 
         // Register contracts with CentralAuthority - factory has whitelist permissions
-        ICentralAuthority(centralAuthority).authorizeContract(creatorVestingVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
-        ICentralAuthority(centralAuthority).authorizeContract(treasuryVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
-        ICentralAuthority(centralAuthority).authorizeContract(strategicReserveVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
-        ICentralAuthority(centralAuthority).authorizeContract(rewardsDistributor, ICentralAuthority(centralAuthority).REWARDS_DISTRIBUTOR_ROLE());
-        ICentralAuthority(centralAuthority).authorizeContract(governanceModule, ICentralAuthority(centralAuthority).GOVERNANCE_MODULE_ROLE());
+        ICentralAuthority(centralAuthority)
+            .authorizeContract(creatorVestingVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
+        ICentralAuthority(centralAuthority)
+            .authorizeContract(treasuryVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
+        ICentralAuthority(centralAuthority)
+            .authorizeContract(strategicReserveVault, ICentralAuthority(centralAuthority).VAULT_ROLE());
+        ICentralAuthority(centralAuthority)
+            .authorizeContract(rewardsDistributor, ICentralAuthority(centralAuthority).REWARDS_DISTRIBUTOR_ROLE());
+        ICentralAuthority(centralAuthority)
+            .authorizeContract(governanceModule, ICentralAuthority(centralAuthority).GOVERNANCE_MODULE_ROLE());
 
         // Transfer fee - emit event on failure but don't revert (prevents DoS)
         (bool feeSent,) = platformFeeRecipient.call{value: launchFee}("");
@@ -375,10 +386,17 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         // Record launch in registry (don't revert on failure)
         if (creatorRegistry != address(0)) {
             try ICreatorProfileRegistry(creatorRegistry)
-                .recordLaunch(msg.sender, launchId, bootstrapperAddr, config.targetLiquidityETH) {} catch {}
+                .recordLaunch(msg.sender, launchId, bootstrapperAddr, config.targetLiquidityETH) {}
+                catch {}
         }
 
-        emit LaunchCreated(launchId, bootstrapperAddr, msg.sender, config.targetLiquidityETH, block.timestamp + config.raiseWindowDuration);
+        emit LaunchCreated(
+            launchId,
+            bootstrapperAddr,
+            msg.sender,
+            config.targetLiquidityETH,
+            block.timestamp + config.raiseWindowDuration
+        );
     }
 
     // =============================================================
@@ -386,7 +404,7 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
     // =============================================================
 
     function _deployCreatorVestingVault() internal returns (address) {
-        address vault = address(new CreatorVestingVault(address(this), platformFeeRecipient, centralAuthority));
+        address vault = address(new CreatorVestingVault(address(this), centralAuthority));
         emit CreatorVestingVaultDeployed(vault);
         return vault;
     }
@@ -409,8 +427,17 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         return distributor;
     }
 
-    function _deployGovernanceModule(address bootstrapper, address treasuryVault, address strategicReserveVault, address creator) internal returns (address) {
-        address governance = address(new RevvFiGovernance(bootstrapper, treasuryVault, strategicReserveVault, creator, address(this), centralAuthority));
+    function _deployGovernanceModule(
+        address bootstrapper,
+        address treasuryVault,
+        address strategicReserveVault,
+        address creator
+    ) internal returns (address) {
+        address governance = address(
+            new RevvFiGovernance(
+                bootstrapper, treasuryVault, strategicReserveVault, creator, address(this), centralAuthority
+            )
+        );
         emit GovernanceModuleDeployed(governance);
         return governance;
     }
@@ -486,7 +513,10 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
         emit FeesUpdated(newLaunchFee, newKeeperReward);
     }
 
-    function setDurationBounds(uint256 newMinLock, uint256 newMaxLock, uint256 newMinRaise, uint256 newMaxRaise) external onlyDAO {
+    function setDurationBounds(uint256 newMinLock, uint256 newMaxLock, uint256 newMinRaise, uint256 newMaxRaise)
+        external
+        onlyDAO
+    {
         if (newMinLock > newMaxLock) revert InvalidLockDuration();
         if (newMinRaise > newMaxRaise) revert InvalidRaiseWindow();
         minLockDuration = newMinLock;
