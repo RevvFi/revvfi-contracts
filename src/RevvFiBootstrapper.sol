@@ -19,6 +19,7 @@ import "./interfaces/IStrategicReserveVault.sol";
 import "./interfaces/IRewardDistributor.sol";
 import "./interfaces/IRevvFiFactory.sol";
 import "./interfaces/ICentralAuthority.sol";
+import "./interfaces/IRevvFiGovernance.sol";
 
 contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, PausableUpgradeable {
     using SafeERC20 for IERC20;
@@ -319,7 +320,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         shares[msg.sender] += msg.value;
         totalShares += msg.value;
         totalDepositedETH += msg.value;
-
+_takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
         emit Deposited(msg.sender, msg.value);
     }
 
@@ -347,6 +348,10 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         _addLiquidityWithAmount(ethForLiquidity);
 
         launched = true;
+
+        if (governanceModule != address(0)) {
+    try IRevvFiGovernance(governanceModule).takeGlobalSnapshot() {} catch {}
+}
 
         if (keeperReward > 0) {
             (bool sent,) = msg.sender.call{value: keeperReward}("");
@@ -389,6 +394,8 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         totalShares -= amount;
         totalDepositedETH -= amount;
 
+        _takeGovernanceSnapshot(msg.sender, 0);
+
         (bool ok,) = msg.sender.call{value: amount}("");
         if (!ok) revert RefundFailed();
 
@@ -422,6 +429,8 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         totalShares -= shareAmount;
         uniLPTokenAmount -= lpToRemove;
         expectedTokenBalance -= tokenReduction;
+
+        _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
 
         // Now external calls
         (uint256 ethOut, uint256 tokenOut) = _removeLiquidity(lpToRemove);
@@ -476,6 +485,16 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     // =============================================================
     // Internal Functions
     // =============================================================
+
+    function _takeGovernanceSnapshot(address user, uint256 newShares) internal {
+    if (governanceModule != address(0)) {
+        try IRevvFiGovernance(governanceModule).onSharesUpdated(user, newShares) {
+            // Success
+        } catch {
+            emit GovernanceCallbackFailed(governanceModule, user, newShares);
+        }
+    }
+}
 
     function _addLiquidityWithAmount(uint256 ethAmount) internal {
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapRouter);

@@ -16,4 +16,5 @@ interface IRevvFiGovernance {
     function pause() external;
     function unpause() external;
     function onSharesUpdated(address lp, uint256 newShares) external;
+    function takeGlobalSnapshot() external;
 }
