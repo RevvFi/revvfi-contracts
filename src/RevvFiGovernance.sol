@@ -4,6 +4,7 @@ pragma solidity 0.8.33;
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 import "./interfaces/IRevvFiBootstrapper.sol";
 import "./interfaces/ITreasuryVault.sol";
 import "./interfaces/IStrategicReserveVault.sol";
@@ -11,8 +12,10 @@ import "./interfaces/ICentralAuthority.sol";
 import "./interfaces/IRewardDistributor.sol";
 
 contract RevvFiGovernance is ReentrancyGuard, AccessControl {
+    using Address for address;
+
     // =============================================================
-    // Role Constants (Must be defined BEFORE they are used)
+    // Role Constants
     // =============================================================
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
     bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
@@ -37,7 +40,6 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     error VotingEnded();
     error VotingNotEnded();
     error AlreadyVoted();
-    error NoVotingPower();
     error InvalidProposalType();
     error InvalidTarget();
     error InvalidFunctionSelector();
@@ -47,10 +49,12 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     error RewardsDistributorError();
     error TimelockTooShort();
     error TimelockTooLong();
-    error ProposalAlreadyFinalized();
     error EmptyDescription();
     error NoSnapshotForUser();
-    error InvalidSelector();
+    error AlreadyFinalized();
+    error ProposalExpired();
+    error ExecutionGracePeriodExpired();
+    error InvalidCalldataLength();
 
     // =============================================================
     // Constants
@@ -59,11 +63,12 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     uint256 public constant VOTING_PERIOD = 5 days;
     uint256 public constant MIN_PROPOSAL_THRESHOLD_BPS = 100; // 1% of total shares
     uint256 public constant MIN_QUORUM_BPS = 3000; // 30% quorum
-    
+    uint256 public constant EXECUTION_GRACE_PERIOD = 7 days; // 7 days after timelock to execute
+
     // Timelock bounds
     uint256 public constant MIN_TIMELOCK = 1 days;
     uint256 public constant MAX_TIMELOCK = 30 days;
-    
+
     // Proposal types
     uint8 public constant PROPOSAL_TYPE_TREASURY = 0;
     uint8 public constant PROPOSAL_TYPE_STRATEGIC = 1;
@@ -79,17 +84,25 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     uint8 public constant PROPOSAL_STATE_DEFEATED = 3;
     uint8 public constant PROPOSAL_STATE_EXECUTED = 4;
     uint8 public constant PROPOSAL_STATE_CANCELLED = 5;
+    uint8 public constant PROPOSAL_STATE_EXPIRED = 6;
 
     // =============================================================
-    // Checkpoint System (Fixed - Uses Proper Snapshot IDs)
+    // Checkpoint System - Fixed (Explicit Checkpoint Struct)
     // =============================================================
-    
-    mapping(address => mapping(uint256 => uint256)) public checkpoints; // user => snapshotId => balance
-    mapping(address => uint256) public userLastSnapshotId;
+
+    struct Checkpoint {
+        uint256 snapshotId;
+        uint256 balance;
+        bool exists;
+    }
+
+    mapping(address => Checkpoint[]) public checkpoints; // user => checkpoints array
+    mapping(address => uint256) public userLatestCheckpointId;
     uint256 public currentSnapshotId;
-    
+
     // Proposal snapshot mapping
     mapping(uint256 => uint256) public proposalSnapshotId;
+    mapping(uint256 => uint256) public proposalCreationBalance; // Store balance at proposal creation
 
     // =============================================================
     // Structs
@@ -112,6 +125,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         bool cancelled;
         string description;
         uint256 snapshotId;
+        uint256 creationBalance; // Balance snapshot at proposal creation
     }
 
     struct ProposalView {
@@ -131,6 +145,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         bool cancelled;
         string description;
         uint256 snapshotId;
+        uint256 creationBalance;
     }
 
     struct Vote {
@@ -147,7 +162,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     mapping(bytes4 => bool) public strategicAllowedSelectors;
     mapping(bytes4 => bool) public rewardsAllowedSelectors;
     mapping(bytes4 => bool) public bootstrapperAllowedSelectors;
-    mapping(bytes4 => bool) public governanceAllowedSelectors; // For self-calls
+    mapping(bytes4 => bool) public governanceAllowedSelectors;
 
     // =============================================================
     // State Variables
@@ -166,6 +181,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     mapping(uint256 => mapping(address => Vote)) public votes;
     mapping(uint256 => uint256) public proposalTimelock;
     mapping(uint256 => bool) public creatorVetoed;
+    mapping(uint256 => uint256) public proposalExecutionDeadline;
 
     // Timelock configuration
     uint256 public treasuryTimelock = 7 days;
@@ -189,6 +205,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         uint256 startTime,
         uint256 endTime,
         uint256 snapshotId,
+        uint256 creationBalance,
         string description
     );
     event VoteCast(uint256 indexed proposalId, address indexed voter, bool support, uint256 votingPower);
@@ -201,8 +218,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     event TimelockUpdated(uint8 indexed proposalType, uint256 newDuration);
     event RewardsDistributorSet(address indexed distributor);
     event SelectorWhitelisted(address indexed target, bytes4 selector, bool allowed);
-    event SnapshotTaken(address indexed user, uint256 shareBalance, uint256 snapshotId);
-    event GlobalSnapshotTaken(uint256 snapshotId);
+    event GlobalSnapshotTaken(uint256 snapshotId, uint256 timestamp);
 
     // =============================================================
     // Modifiers
@@ -280,34 +296,48 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     }
 
     // =============================================================
-    // Snapshot Management
+    // Snapshot Management - Fixed
     // =============================================================
 
     function _takeSnapshot(address user, uint256 shareBalance) internal {
-        checkpoints[user][currentSnapshotId] = shareBalance;
-        userLastSnapshotId[user] = currentSnapshotId;
-        emit SnapshotTaken(user, shareBalance, currentSnapshotId);
+        Checkpoint[] storage userCheckpoints = checkpoints[user];
+
+        // Only add checkpoint if balance changed or no checkpoints exist
+        if (userCheckpoints.length == 0 || userCheckpoints[userCheckpoints.length - 1].balance != shareBalance) {
+            userCheckpoints.push(Checkpoint({snapshotId: currentSnapshotId, balance: shareBalance, exists: true}));
+        }
+        userLatestCheckpointId[user] = currentSnapshotId;
     }
-    
+
     function takeSnapshot(address user, uint256 shareBalance) external onlyBootstrapper {
         _takeSnapshot(user, shareBalance);
     }
-    
+
     function takeGlobalSnapshot() external onlyBootstrapper {
         currentSnapshotId++;
-        emit GlobalSnapshotTaken(currentSnapshotId);
+        emit GlobalSnapshotTaken(currentSnapshotId, block.timestamp);
     }
 
     function getSnapshotShareBalance(address user, uint256 snapshotId) public view returns (uint256) {
-        if (userLastSnapshotId[user] < snapshotId) return 0;
-        
-        uint256 balance = checkpoints[user][snapshotId];
-        
-        if (balance == 0 && snapshotId > 1) {
-            return checkpoints[user][userLastSnapshotId[user]];
+        Checkpoint[] storage userCheckpoints = checkpoints[user];
+
+        if (userCheckpoints.length == 0) return 0;
+
+        // Binary search for the latest checkpoint <= snapshotId
+        uint256 low = 0;
+        uint256 high = userCheckpoints.length;
+
+        while (low < high) {
+            uint256 mid = (low + high) / 2;
+            if (userCheckpoints[mid].snapshotId <= snapshotId) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
         }
-        
-        return balance;
+
+        if (low == 0) return 0;
+        return userCheckpoints[low - 1].balance;
     }
 
     // =============================================================
@@ -360,20 +390,41 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         if (bytes(description).length == 0) revert EmptyDescription();
         if (proposalType > 5) revert InvalidProposalType();
 
-        bytes4 selector = bytes4(callData);
-        _validateFunctionSelector(target, proposalType, selector);
+        bytes4 selector;
+
+        assembly ("memory-safe") {
+            // skip bytes length slot
+            selector := mload(add(callData, 32))
+        }
+
+        // Validate timelock update proposals separately
+        if (proposalType == PROPOSAL_TYPE_TIMELOCK_UPDATE) {
+            _validateTimelockUpdate(target, selector, callData);
+        }
+
+        _validateFunctionSelector(target, proposalType, selector, callData);
 
         uint256 votingPower = IRevvFiBootstrapper(bootstrapper).shares(msg.sender);
+
         uint256 totalShares = IRevvFiBootstrapper(bootstrapper).totalShares();
+
         uint256 minThreshold = (totalShares * MIN_PROPOSAL_THRESHOLD_BPS) / BASIS_POINTS;
-        if (votingPower < minThreshold) revert InsufficientProposingPower();
+
+        if (votingPower < minThreshold) {
+            revert InsufficientProposingPower();
+        }
+
+        // Increment snapshot before proposal creation
+        currentSnapshotId++;
 
         proposalCounter++;
         uint256 snapshotId = currentSnapshotId;
-        
+
+        // Snapshot proposer balance
         _takeSnapshot(msg.sender, votingPower);
 
         Proposal storage newProposal = proposals[proposalCounter];
+
         newProposal.id = proposalCounter;
         newProposal.proposer = msg.sender;
         newProposal.target = target;
@@ -390,8 +441,10 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         newProposal.cancelled = false;
         newProposal.description = description;
         newProposal.snapshotId = snapshotId;
+        newProposal.creationBalance = votingPower;
 
         proposalSnapshotId[proposalCounter] = snapshotId;
+        proposalCreationBalance[proposalCounter] = votingPower;
 
         emit ProposalCreated(
             proposalCounter,
@@ -402,13 +455,17 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
             block.timestamp,
             block.timestamp + VOTING_PERIOD,
             snapshotId,
+            votingPower,
             description
         );
 
         return proposalCounter;
     }
 
-    function _validateFunctionSelector(address target, uint8 proposalType, bytes4 selector) internal view {
+    function _validateFunctionSelector(address target, uint8 proposalType, bytes4 selector, bytes memory callData)
+        internal
+        view
+    {
         if (proposalType == PROPOSAL_TYPE_TREASURY) {
             if (target != treasuryVault) revert InvalidTarget();
             if (!treasuryAllowedSelectors[selector]) revert InvalidFunctionSelector();
@@ -447,6 +504,11 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         }
 
         emit VoteCast(proposalId, msg.sender, support, votingPower);
+
+        // Auto-finalize if voting period ended
+        if (block.timestamp > proposal.endTime) {
+            _finalizeProposal(proposalId);
+        }
     }
 
     function finalizeProposal(uint256 proposalId) external proposalExists(proposalId) {
@@ -473,7 +535,9 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
         if (passed) {
             proposal.state = PROPOSAL_STATE_SUCCEEDED;
-            proposalTimelock[proposalId] = block.timestamp + _getTimelockDuration(proposal.proposalType);
+            uint256 timelockDuration = _getTimelockDuration(proposal.proposalType);
+            proposalTimelock[proposalId] = block.timestamp + timelockDuration;
+            proposalExecutionDeadline[proposalId] = proposalTimelock[proposalId] + EXECUTION_GRACE_PERIOD;
         } else {
             proposal.state = PROPOSAL_STATE_DEFEATED;
         }
@@ -489,12 +553,13 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         if (proposal.cancelled) revert ProposalCancelled();
         if (creatorVetoed[proposalId]) revert ProposalCancelled();
         if (block.timestamp < proposalTimelock[proposalId]) revert TimelockActive();
-
-        (bool success,) = proposal.target.call(proposal.callData);
-        if (!success) revert ExecutionFailed();
+        if (block.timestamp > proposalExecutionDeadline[proposalId]) revert ExecutionGracePeriodExpired();
 
         proposal.executed = true;
         proposal.state = PROPOSAL_STATE_EXECUTED;
+
+        // Use functionCall to get revert reason
+        proposal.target.functionCall(proposal.callData);
 
         emit ProposalExecution(proposalId, msg.sender);
     }
@@ -525,21 +590,26 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     }
 
     // =============================================================
-    // Timelock Update Functions (Governance Controlled)
-    // MUST be placed AFTER the propose() function
+    // Timelock Update Functions
     // =============================================================
 
     function proposeTimelockUpdate(uint8 proposalType, uint256 newDuration) external whenNotPaused returns (uint256) {
         if (newDuration < MIN_TIMELOCK) revert TimelockTooShort();
         if (newDuration > MAX_TIMELOCK) revert TimelockTooLong();
-        
-        bytes memory callData = abi.encodeWithSignature("executeTimelockUpdate(uint8,uint256)", proposalType, newDuration);
-        
+        if (proposalType == PROPOSAL_TYPE_TIMELOCK_UPDATE) revert InvalidProposalType(); // Prevent self-update
+
+        bytes memory callData =
+            abi.encodeWithSignature("executeTimelockUpdate(uint8,uint256)", proposalType, newDuration);
+
         uint256 proposalId = propose(
             address(this),
             callData,
             PROPOSAL_TYPE_TIMELOCK_UPDATE,
-            string(abi.encodePacked("Update timelock for proposal type ", uintToString(proposalType), " to ", uintToString(newDuration)))
+            string(
+                abi.encodePacked(
+                    "Update timelock for proposal type ", uintToString(proposalType), " to ", uintToString(newDuration)
+                )
+            )
         );
 
         return proposalId;
@@ -547,14 +617,15 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
     function executeTimelockUpdate(uint8 proposalType, uint256 newDuration) external {
         if (msg.sender != address(this)) revert NotAuthorized();
-        
+        if (proposalType == PROPOSAL_TYPE_TIMELOCK_UPDATE) revert InvalidProposalType();
+
         if (proposalType == PROPOSAL_TYPE_TREASURY) treasuryTimelock = newDuration;
         else if (proposalType == PROPOSAL_TYPE_STRATEGIC) strategicTimelock = newDuration;
         else if (proposalType == PROPOSAL_TYPE_LOCK_REDUCTION) lockReductionTimelock = newDuration;
         else if (proposalType == PROPOSAL_TYPE_EMERGENCY) emergencyTimelock = newDuration;
         else if (proposalType == PROPOSAL_TYPE_REWARDS_CLAIMER) rewardsClaimerTimelock = newDuration;
         else revert InvalidProposalType();
-        
+
         emit TimelockUpdated(proposalType, newDuration);
     }
 
@@ -619,6 +690,32 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
     }
 
     // =============================================================
+    // Internal Functions
+    // =============================================================
+
+    function _validateTimelockUpdate(address target, bytes4 selector, bytes memory callData) internal view {
+        if (target != address(this)) revert InvalidTarget();
+
+        if (selector != this.executeTimelockUpdate.selector) {
+            revert InvalidFunctionSelector();
+        }
+
+        if (callData.length != 68) {
+            revert InvalidCalldataLength();
+        }
+
+        uint8 targetProposalType;
+
+        assembly ("memory-safe") {
+            targetProposalType := mload(add(callData, 36))
+        }
+
+        if (targetProposalType == PROPOSAL_TYPE_TIMELOCK_UPDATE) {
+            revert InvalidProposalType();
+        }
+    }
+
+    // =============================================================
     // View Functions
     // =============================================================
 
@@ -640,7 +737,8 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
             executed: p.executed,
             cancelled: p.cancelled,
             description: p.description,
-            snapshotId: p.snapshotId
+            snapshotId: p.snapshotId,
+            creationBalance: p.creationBalance
         });
     }
 
@@ -648,11 +746,14 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         Proposal storage proposal = proposals[proposalId];
         if (proposal.cancelled) return PROPOSAL_STATE_CANCELLED;
         if (proposal.executed) return PROPOSAL_STATE_EXECUTED;
-        if (proposal.state == PROPOSAL_STATE_SUCCEEDED || proposal.state == PROPOSAL_STATE_DEFEATED) {
-            return proposal.state;
+        if (proposal.state == PROPOSAL_STATE_SUCCEEDED) {
+            if (block.timestamp > proposalExecutionDeadline[proposalId]) return PROPOSAL_STATE_EXPIRED;
+            return PROPOSAL_STATE_SUCCEEDED;
         }
+        if (proposal.state == PROPOSAL_STATE_DEFEATED) return PROPOSAL_STATE_DEFEATED;
         if (proposal.state != PROPOSAL_STATE_ACTIVE) return proposal.state;
-        if (block.timestamp > proposal.endTime) return PROPOSAL_STATE_PENDING;
+        if (block.timestamp > proposal.endTime) return PROPOSAL_STATE_EXPIRED;
+        if (block.timestamp < proposal.startTime) return PROPOSAL_STATE_PENDING;
         return PROPOSAL_STATE_ACTIVE;
     }
 
@@ -692,6 +793,7 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         if (proposal.cancelled) return false;
         if (creatorVetoed[proposalId]) return false;
         if (block.timestamp < proposalTimelock[proposalId]) return false;
+        if (block.timestamp > proposalExecutionDeadline[proposalId]) return false;
         return true;
     }
 
@@ -699,6 +801,12 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
         if (proposalTimelock[proposalId] == 0) return 0;
         if (block.timestamp >= proposalTimelock[proposalId]) return 0;
         return proposalTimelock[proposalId] - block.timestamp;
+    }
+
+    function getRemainingExecutionGracePeriod(uint256 proposalId) external view returns (uint256) {
+        if (proposalExecutionDeadline[proposalId] == 0) return 0;
+        if (block.timestamp >= proposalExecutionDeadline[proposalId]) return 0;
+        return proposalExecutionDeadline[proposalId] - block.timestamp;
     }
 
     function getVotingPower(address lp) external view returns (uint256) {
@@ -711,6 +819,10 @@ contract RevvFiGovernance is ReentrancyGuard, AccessControl {
 
     function getUserSnapshotBalance(address user, uint256 snapshotId) external view returns (uint256) {
         return getSnapshotShareBalance(user, snapshotId);
+    }
+
+    function getUserCheckpoints(address user) external view returns (Checkpoint[] memory) {
+        return checkpoints[user];
     }
 
     // =============================================================

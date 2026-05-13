@@ -19,7 +19,6 @@ import "./interfaces/IStrategicReserveVault.sol";
 import "./interfaces/IRewardDistributor.sol";
 import "./interfaces/IRevvFiFactory.sol";
 import "./interfaces/ICentralAuthority.sol";
-import "./interfaces/IRevvFiGovernance.sol";
 
 contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, PausableUpgradeable {
     using SafeERC20 for IERC20;
@@ -37,10 +36,11 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     error AlreadyFailed();
     error NotLaunched();
     error RaiseNotEnded();
+    error RaiseEnded();
     error NotFailed();
     error RefundAlreadyClaimed();
     error NoShares();
-    error RefundFailed();
+    error ETHTransferFailed();
     error WithdrawLocked();
     error InsufficientShareAmount();
     error InvalidShareAmount();
@@ -52,11 +52,13 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     error VestingInitFailed();
     error RewardsInitFailed();
     error CannotRescueCoreToken();
+    error CannotRescueETH();
     error InsufficientTokenBalance();
     error UnexpectedTokenBalance();
     error InvalidFactoryCaller();
     error GovernanceCallbackFail();
     error DivisionByZero();
+    error SlippageTooHigh();
 
     // =============================================================
     // Constants
@@ -64,7 +66,9 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
     uint256 public constant PRECISION = 1e18;
     uint256 public constant DEADLINE_BUFFER = 300;
-    uint256 public constant MIN_WITHDRAWAL_SHARES = 1e15;
+    uint256 public constant MIN_WITHDRAWAL_SHARES_BPS = 10; // 0.1% of total shares minimum
+    uint256 public constant BASIS_POINTS = 10000;
+    uint256 public constant DEFAULT_SLIPPAGE_BPS = 100; // 1% default slippage
 
     // =============================================================
     // Role Constants
@@ -72,7 +76,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
 
     bytes32 public constant DAO_ROLE = keccak256("DAO_ROLE");
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
-    bytes32 public constant FACTORY_ROLE = keccak256("FACTORY_ROLE");
+    bytes32 public constant DEFAULT_ADMIN_ROLE = 0x00;
 
     // =============================================================
     // Immutable Core Config
@@ -159,6 +163,8 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     event TokensTransferredToVault(address indexed vault, uint256 amount);
     event TokensRescued(address indexed token, uint256 amount, address indexed recipient);
     event GovernanceCallbackFailed(address indexed governance, address indexed lp, uint256 shares);
+    event ETHRescued(address indexed recipient, uint256 amount);
+    event PausedStateChanged(bool paused, address indexed executor);
 
     // =============================================================
     // Modifiers
@@ -178,13 +184,6 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         _;
     }
 
-    modifier onlyFactory() {
-        if (!ICentralAuthority(centralAuthority).hasRole(FACTORY_ROLE, msg.sender)) {
-            revert UnauthorizedCaller();
-        }
-        _;
-    }
-
     modifier onlyCreator() {
         if (msg.sender != creator) revert UnauthorizedCaller();
         _;
@@ -193,7 +192,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     modifier onlyLaunchPhase() {
         if (launched) revert AlreadyLaunched();
         if (failed) revert AlreadyFailed();
-        if (block.timestamp > raiseEndTime) revert RaiseNotEnded();
+        if (block.timestamp > raiseEndTime) revert RaiseEnded();
         _;
     }
 
@@ -243,7 +242,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         __ReentrancyGuard_init();
         __Pausable_init();
 
-        if (!ICentralAuthority(_centralAuthority).hasRole(FACTORY_ROLE, msg.sender)) {
+        if (!ICentralAuthority(_centralAuthority).hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
             revert InvalidFactoryCaller();
         }
 
@@ -302,8 +301,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
     }
 
     function _safeApprove(address token, address spender, uint256 amount) internal {
-        IERC20(token).approve(spender, 0);
-        IERC20(token).approve(spender, amount);
+        IERC20(token).forceApprove(spender, amount);
     }
 
     // =============================================================
@@ -320,7 +318,7 @@ contract RevvFiBootstrapper is Initializable, ReentrancyGuardUpgradeable, Pausab
         shares[msg.sender] += msg.value;
         totalShares += msg.value;
         totalDepositedETH += msg.value;
-_takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
+        _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
         emit Deposited(msg.sender, msg.value);
     }
 
@@ -332,7 +330,7 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
         if (totalDepositedETH < targetLiquidityETH) revert TargetNotMet();
 
         uint256 currentBalance = IERC20(revvToken).balanceOf(address(this));
-        if (currentBalance < expectedTokenBalance) revert UnexpectedTokenBalance();
+        if (currentBalance < liquidityAllocation) revert UnexpectedTokenBalance();
 
         uint256 ethForLiquidity = totalDepositedETH;
         if (keeperReward > 0) {
@@ -348,10 +346,6 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
         _addLiquidityWithAmount(ethForLiquidity);
 
         launched = true;
-
-        if (governanceModule != address(0)) {
-    try IRevvFiGovernance(governanceModule).takeGlobalSnapshot() {} catch {}
-}
 
         if (keeperReward > 0) {
             (bool sent,) = msg.sender.call{value: keeperReward}("");
@@ -397,7 +391,7 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
         _takeGovernanceSnapshot(msg.sender, 0);
 
         (bool ok,) = msg.sender.call{value: amount}("");
-        if (!ok) revert RefundFailed();
+        if (!ok) revert ETHTransferFailed();
 
         emit Refunded(msg.sender, amount);
     }
@@ -406,9 +400,16 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
     // Withdrawals After Maturity
     // =============================================================
 
-    function withdrawAsAssets(uint256 shareAmount) external nonReentrant afterLaunch whenNotPaused {
+    function withdrawAsAssets(uint256 shareAmount, uint256 minETHOut, uint256 minTokenOut)
+        external
+        nonReentrant
+        afterLaunch
+        whenNotPaused
+    {
         if (block.timestamp < maturityTime) revert WithdrawLocked();
-        if (shareAmount < MIN_WITHDRAWAL_SHARES) revert InsufficientShareAmount();
+
+        uint256 minShares = (totalShares * MIN_WITHDRAWAL_SHARES_BPS) / BASIS_POINTS;
+        if (shareAmount < minShares && shareAmount < totalShares) revert InsufficientShareAmount();
         if (shareAmount > shares[msg.sender]) revert InvalidShareAmount();
         if (totalShares == 0) revert InvalidShareAmount();
 
@@ -417,23 +418,18 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
 
         if (lpToRemove == 0) revert InsufficientShareAmount();
 
-        // CRITICAL FIX: Store previous LP amount BEFORE mutation to avoid division by zero
         uint256 previousLP = uniLPTokenAmount;
         if (previousLP == 0) revert DivisionByZero();
-
-        // Calculate token reduction using PREVIOUS LP amount
-        uint256 tokenReduction = (lpToRemove * liquidityAllocation) / previousLP;
 
         // CEI Pattern: Update state BEFORE external call
         shares[msg.sender] -= shareAmount;
         totalShares -= shareAmount;
         uniLPTokenAmount -= lpToRemove;
-        expectedTokenBalance -= tokenReduction;
 
         _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
 
-        // Now external calls
-        (uint256 ethOut, uint256 tokenOut) = _removeLiquidity(lpToRemove);
+        // Now external calls with slippage protection
+        (uint256 ethOut, uint256 tokenOut) = _removeLiquidity(lpToRemove, minETHOut, minTokenOut);
 
         if (governanceModule != address(0)) {
             try IRevvFiGovernance(governanceModule).onSharesUpdated(msg.sender, shares[msg.sender]) {
@@ -446,7 +442,7 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
 
         if (ethOut > 0) {
             (bool ok,) = msg.sender.call{value: ethOut}("");
-            if (!ok) revert RefundFailed();
+            if (!ok) revert ETHTransferFailed();
         }
 
         if (tokenOut > 0) {
@@ -457,7 +453,7 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
     }
 
     // =============================================================
-    // Emergency Token Rescue
+    // Emergency Token Rescue (Guardian Only)
     // =============================================================
 
     function rescueTokens(address token, uint256 amount, address recipient) external onlyGuardian {
@@ -469,12 +465,6 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
         if (token == uniswapPair) revert CannotRescueCoreToken();
         if (token == address(this)) revert CannotRescueCoreToken();
 
-        if (token == weth) {
-            if (uniLPTokenAmount > 0 && IERC20(uniswapPair).balanceOf(address(this)) > 0) {
-                revert CannotRescueCoreToken();
-            }
-        }
-
         uint256 balance = IERC20(token).balanceOf(address(this));
         if (amount > balance) revert InvalidShareAmount();
 
@@ -482,27 +472,42 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
         emit TokensRescued(token, amount, recipient);
     }
 
+    function rescueETH(address recipient) external onlyGuardian {
+        if (block.timestamp < maturityTime) revert WithdrawLocked();
+        if (recipient == address(0)) revert ZeroAddress();
+
+        uint256 balance = address(this).balance;
+        if (balance > 0) {
+            (bool ok,) = recipient.call{value: balance}("");
+            if (!ok) revert ETHTransferFailed();
+            emit ETHRescued(recipient, balance);
+        } else {
+            revert CannotRescueETH();
+        }
+    }
+
     // =============================================================
     // Internal Functions
     // =============================================================
 
     function _takeGovernanceSnapshot(address user, uint256 newShares) internal {
-    if (governanceModule != address(0)) {
-        try IRevvFiGovernance(governanceModule).onSharesUpdated(user, newShares) {
+        if (governanceModule != address(0)) {
+            try IRevvFiGovernance(governanceModule).onSharesUpdated(user, newShares) {
             // Success
-        } catch {
-            emit GovernanceCallbackFailed(governanceModule, user, newShares);
+            }
+            catch {
+                emit GovernanceCallbackFailed(governanceModule, user, newShares);
+            }
         }
     }
-}
 
     function _addLiquidityWithAmount(uint256 ethAmount) internal {
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapRouter);
 
         _ensureLPPairExists();
 
-        uint256 minTokenAmount = (liquidityAllocation * 95) / 100;
-        uint256 minETHAmount = (ethAmount * 95) / 100;
+        uint256 minTokenAmount = (liquidityAllocation * (BASIS_POINTS - DEFAULT_SLIPPAGE_BPS)) / BASIS_POINTS;
+        uint256 minETHAmount = (ethAmount * (BASIS_POINTS - DEFAULT_SLIPPAGE_BPS)) / BASIS_POINTS;
 
         (,, uint256 liquidity) = router.addLiquidityETH{value: ethAmount}(
             revvToken,
@@ -515,7 +520,6 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
 
         if (liquidity == 0) revert LiquidityAddFailed();
         uniLPTokenAmount = liquidity;
-        expectedTokenBalance -= liquidityAllocation;
     }
 
     function _ensureLPPairExists() internal {
@@ -531,13 +535,20 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
         uniswapPair = pair;
     }
 
-    function _removeLiquidity(uint256 lpAmount) internal returns (uint256 ethOut, uint256 tokenOut) {
+    function _removeLiquidity(uint256 lpAmount, uint256 minEthOut, uint256 minTokenOut)
+        internal
+        returns (uint256 ethOut, uint256 tokenOut)
+    {
         if (uniswapPair == address(0)) revert PairNotFound();
 
-        IERC20(uniswapPair).approve(uniswapRouter, lpAmount);
+        IERC20(uniswapPair).forceApprove(uniswapRouter, lpAmount);
 
         (tokenOut, ethOut) = IUniswapV2Router02(uniswapRouter)
-            .removeLiquidityETH(revvToken, lpAmount, 0, 0, address(this), block.timestamp + DEADLINE_BUFFER);
+            .removeLiquidityETH(
+                revvToken, lpAmount, minTokenOut, minEthOut, address(this), block.timestamp + DEADLINE_BUFFER
+            );
+
+        if (ethOut < minEthOut || tokenOut < minTokenOut) revert SlippageTooHigh();
     }
 
     function _transferToVaults() internal {
@@ -597,19 +608,25 @@ _takeGovernanceSnapshot(msg.sender, shares[msg.sender]);
 
     function emergencyPause() external onlyGuardian {
         _pause();
+        emit PausedStateChanged(true, msg.sender);
     }
 
     function emergencyUnpause() external onlyGuardian {
         _unpause();
+        emit PausedStateChanged(false, msg.sender);
     }
 
     // =============================================================
     // View Functions
     // =============================================================
 
+    function getMinimumWithdrawalShares() external view returns (uint256) {
+        return (totalShares * MIN_WITHDRAWAL_SHARES_BPS) / BASIS_POINTS;
+    }
+
     function getShareValueBps(address user) external view returns (uint256) {
         if (totalShares == 0) return 0;
-        return (shares[user] * 10000) / totalShares;
+        return (shares[user] * BASIS_POINTS) / totalShares;
     }
 
     function getVotingPower(address lp) external view returns (uint256) {

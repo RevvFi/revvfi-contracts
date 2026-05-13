@@ -27,15 +27,19 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
     error InvalidAmount();
     error InsufficientBalance();
     error AlreadyInitialized();
-    error TransferFailed();
     error InvalidRecipient();
     error ZeroAmount();
+    error TooManyRecipients();
+    error CooldownActive();
+    error DailyCapExceeded();
 
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
 
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant MAX_RELEASE_PERCENTAGE = 2500; // 25% max per release
+    uint256 public constant MAX_BATCH_SIZE = 50; // Maximum 50 recipients per batch
+    uint256 public constant DAILY_RELEASE_CAP_PERCENT = 1000; // 10% daily cap
 
     IERC20 public immutable token;
     address public immutable factory;
@@ -46,12 +50,21 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
     uint256 public totalReleased;
     bool public emergencyPaused;
 
+    // Cumulative release tracking per rolling window
+    uint256 public lastReleaseTimestamp;
+    uint256 public lastReleaseWindowStart;
+    uint256 public releasedInCurrentWindow;
+
     // Events
-    event TokensReleased(uint256 amount, address indexed recipient, address indexed executor, uint256 totalReleasedSoFar);
+    event TokensReleased(
+        uint256 amount, address indexed recipient, address indexed executor, uint256 totalReleasedSoFar
+    );
+    event BatchTokensReleased(uint256 totalAmount, uint256 recipientsCount, address indexed executor);
     event GovernanceModuleUpdated(address indexed oldModule, address indexed newModule);
     event TreasuryPaused(address indexed executor);
     event TreasuryUnpaused(address indexed executor);
     event TokensRecovered(address indexed token, uint256 amount, address indexed recipient);
+    event DailyWindowReset(uint256 newWindowStart, uint256 accumulatedReleased);
 
     modifier onlyFactory() {
         if (msg.sender != factory) revert NotFactory();
@@ -87,6 +100,9 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
         centralAuthority = _centralAuthority;
         emergencyPaused = false;
         totalReleased = 0;
+        lastReleaseTimestamp = 0;
+        lastReleaseWindowStart = block.timestamp;
+        releasedInCurrentWindow = 0;
 
         _grantRole(DEFAULT_ADMIN_ROLE, _factory);
         _grantRole(GUARDIAN_ROLE, _factory);
@@ -103,45 +119,78 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
         emit GovernanceModuleUpdated(address(0), _governanceModule);
     }
 
-    function release(uint256 amount, address recipient) external onlyGovernance whenNotPaused {
+    function _resetDailyWindowIfNeeded() internal {
+        uint256 currentDay = block.timestamp / 1 days;
+        uint256 windowStartDay = lastReleaseWindowStart / 1 days;
+
+        if (currentDay > windowStartDay) {
+            releasedInCurrentWindow = 0;
+            lastReleaseWindowStart = block.timestamp;
+            emit DailyWindowReset(lastReleaseWindowStart, releasedInCurrentWindow);
+        }
+    }
+
+    function release(uint256 amount, address recipient) external nonReentrant onlyGovernance whenNotPaused {
         if (amount == 0) revert ZeroAmount();
         if (recipient == address(0)) revert InvalidRecipient();
-        
+
+        _resetDailyWindowIfNeeded();
+
         uint256 balance = token.balanceOf(address(this));
         if (amount > balance) revert InsufficientBalance();
-        
+
         // Rate limiting: max 25% of remaining balance per release
         uint256 maxAmount = (balance * MAX_RELEASE_PERCENTAGE) / BASIS_POINTS;
         if (amount > maxAmount) revert InvalidAmount();
-        
+
+        // Daily cap: max 10% of current balance per day
+        uint256 dailyCap = (balance * DAILY_RELEASE_CAP_PERCENT) / BASIS_POINTS;
+        if (releasedInCurrentWindow + amount > dailyCap) revert DailyCapExceeded();
+
+        releasedInCurrentWindow += amount;
+        lastReleaseTimestamp = block.timestamp;
         totalReleased += amount;
-        
-        emit TokensReleased(amount, recipient, msg.sender, totalReleased);
-        
+
         token.safeTransfer(recipient, amount);
+
+        emit TokensReleased(amount, recipient, msg.sender, totalReleased);
     }
 
-    function batchRelease(address[] calldata recipients, uint256[] calldata amounts) external onlyGovernance whenNotPaused {
+    function batchRelease(address[] calldata recipients, uint256[] calldata amounts)
+        external
+        nonReentrant
+        onlyGovernance
+        whenNotPaused
+    {
         if (recipients.length != amounts.length) revert InvalidAmount();
         if (recipients.length == 0) revert InvalidAmount();
-        
+        if (recipients.length > MAX_BATCH_SIZE) revert TooManyRecipients();
+
+        _resetDailyWindowIfNeeded();
+
         uint256 totalAmount = 0;
         for (uint256 i = 0; i < amounts.length; i++) {
             if (amounts[i] == 0) revert ZeroAmount();
             if (recipients[i] == address(0)) revert InvalidRecipient();
             totalAmount += amounts[i];
         }
-        
+
         uint256 balance = token.balanceOf(address(this));
         uint256 maxAmount = (balance * MAX_RELEASE_PERCENTAGE) / BASIS_POINTS;
         if (totalAmount > maxAmount) revert InvalidAmount();
-        
+
+        uint256 dailyCap = (balance * DAILY_RELEASE_CAP_PERCENT) / BASIS_POINTS;
+        if (releasedInCurrentWindow + totalAmount > dailyCap) revert DailyCapExceeded();
+
+        releasedInCurrentWindow += totalAmount;
+        lastReleaseTimestamp = block.timestamp;
         totalReleased += totalAmount;
-        
+
         for (uint256 i = 0; i < recipients.length; i++) {
             token.safeTransfer(recipients[i], amounts[i]);
-            emit TokensReleased(amounts[i], recipients[i], msg.sender, totalReleased);
         }
+
+        emit BatchTokensReleased(totalAmount, recipients.length, msg.sender);
     }
 
     function pause() external onlyGuardian {
@@ -167,7 +216,7 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
 
     function updateGovernanceModule(address newGovernanceModule) external onlyGuardian {
         if (newGovernanceModule == address(0)) revert ZeroAddress();
-        
+
         address oldModule = governanceModule;
 
         if (oldModule != address(0)) {
@@ -191,9 +240,20 @@ contract TreasuryVault is ReentrancyGuard, AccessControl {
     function getTotalReleased() external view returns (uint256) {
         return totalReleased;
     }
-    
+
     function getMaxReleaseAmount() external view returns (uint256) {
         uint256 balance = token.balanceOf(address(this));
         return (balance * MAX_RELEASE_PERCENTAGE) / BASIS_POINTS;
+    }
+
+    function getRemainingCooldown() external view returns (uint256) {
+        return 0; // Cooldown replaced with daily cap
+    }
+
+    function getRemainingDailyCap() external view returns (uint256) {
+        uint256 balance = token.balanceOf(address(this));
+        uint256 dailyCap = (balance * DAILY_RELEASE_CAP_PERCENT) / BASIS_POINTS;
+        if (releasedInCurrentWindow >= dailyCap) return 0;
+        return dailyCap - releasedInCurrentWindow;
     }
 }
