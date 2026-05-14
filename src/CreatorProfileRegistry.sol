@@ -2,27 +2,38 @@
 pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
+import "./interfaces/ICentralAuthority.sol";
 
-// =============================================================
-// CreatorProfileRegistry
-// =============================================================
-contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, PausableUpgradeable {
+/**
+ * @title CreatorProfileRegistry
+ * @dev Stores creator metadata and reputation scores for LP evaluation.
+ * @dev All role checks delegate to CentralAuthority
+ */
+contract CreatorProfileRegistry is Initializable, PausableUpgradeable {
     using Strings for uint256;
-
-    // =============================================================
-    // Roles
-    // =============================================================
-    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
-    bytes32 public constant ORACLE_ROLE = keccak256("ORACLE_ROLE");
 
     // =============================================================
     // Custom Errors
     // =============================================================
-    error InvalidTemplateId();
     error ZeroAddress();
+    error AlreadyRegistered();
+    error NotRegistered();
+    error InsufficientFee();
+    error AlreadyBlacklisted();
+    error NotBlacklisted();
+    error AlreadyVerified();
+    error LaunchNotFound();
+    error LaunchAlreadyFinalized();
+    error UnauthorizedCaller();
+    error CentralAuthorityNotSet();
+
+    // =============================================================
+    // Role Constants (for CentralAuthority lookups)
+    // =============================================================
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+    bytes32 public constant ORACLE_ROLE = keccak256("ORACLE_ROLE");
 
     // =============================================================
     // Constants
@@ -46,16 +57,13 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
         string github;
         string telegram;
         string discord;
-
         bool kycVerified;
         bool twitterVerified;
         bool githubVerified;
-
         uint256 successfulLaunches;
         uint256 failedLaunches;
         uint256 reputationScore;
         uint256 lastUpdateTime;
-
         bool isRegistered;
     }
 
@@ -65,6 +73,7 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
         address token;
         uint256 createdAt;
         bool success;
+        bool finalized;
         uint256 targetLiquidityETH;
         uint256 raisedETH;
     }
@@ -94,7 +103,9 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
     mapping(address => TokenRecord[]) public creatorTokens;
     mapping(address => mapping(string => SocialVerification)) public socialVerifications;
 
-    // Token address to creator mapping (for quick lookup)
+    // O(1) lookup mappings
+    mapping(address => mapping(uint256 => uint256)) public launchIndexMap;
+
     mapping(address => address) public tokenToCreator;
 
     mapping(address => bool) public blacklisted;
@@ -103,21 +114,17 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
     uint256 public registrationFee;
     address public feeRecipient;
     address public factory;
+    address public centralAuthority;
 
     // =============================================================
     // Events
     // =============================================================
     event ProfileRegistered(address indexed creator, string name, uint256 reputationScore);
-
     event ReputationUpdated(address indexed creator, uint256 oldScore, uint256 newScore, string reason);
-
     event KYCVerified(address indexed creator, address indexed verifier);
-
     event Blacklisted(address indexed creator, string reason);
     event BlacklistRemoved(address indexed creator);
-
     event RegistrationFeeUpdated(uint256 oldFee, uint256 newFee);
-
     event LaunchRecorded(
         address indexed creator,
         uint256 indexed launchId,
@@ -125,15 +132,7 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
         address token,
         uint256 targetLiquidityETH
     );
-
-    event TokenDeployed(
-        address indexed creator,
-        address indexed token,
-        string name,
-        string symbol,
-        uint256 indexed launchId,
-        address bootstrapper
-    );
+    event CentralAuthorityUpdated(address indexed oldAuthority, address indexed newAuthority);
 
     // =============================================================
     // Constructor Lock
@@ -145,37 +144,43 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
     // =============================================================
     // Initializer
     // =============================================================
-    function initialize(address _factory, address _feeRecipient, uint256 _registrationFee) external initializer {
-        __AccessControl_init();
+    function initialize(address _factory, address _feeRecipient, uint256 _registrationFee, address _centralAuthority)
+        external
+        initializer
+    {
         __Pausable_init();
 
-        if (_factory == address(0)) revert InvalidTemplateId();
-        if (_feeRecipient == address(0)) revert InvalidTemplateId();
-
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(GUARDIAN_ROLE, msg.sender);
-        _grantRole(ORACLE_ROLE, msg.sender);
+        if (_factory == address(0)) revert ZeroAddress();
+        if (_feeRecipient == address(0)) revert ZeroAddress();
+        if (_centralAuthority == address(0)) revert ZeroAddress();
 
         factory = _factory;
         feeRecipient = _feeRecipient;
         registrationFee = _registrationFee;
+        centralAuthority = _centralAuthority;
     }
 
     // =============================================================
-    // Modifiers
+    // Modifiers (using CentralAuthority)
     // =============================================================
     modifier onlyFactory() {
-        if (msg.sender != factory) revert InvalidTemplateId();
+        if (msg.sender != factory) revert UnauthorizedCaller();
         _;
     }
 
     modifier onlyGuardian() {
-        if (!hasRole(GUARDIAN_ROLE, msg.sender)) revert InvalidTemplateId();
+        if (centralAuthority == address(0)) revert CentralAuthorityNotSet();
+        if (!ICentralAuthority(centralAuthority).hasRole(GUARDIAN_ROLE, msg.sender)) {
+            revert UnauthorizedCaller();
+        }
         _;
     }
 
     modifier onlyOracle() {
-        if (!hasRole(ORACLE_ROLE, msg.sender)) revert InvalidTemplateId();
+        if (centralAuthority == address(0)) revert CentralAuthorityNotSet();
+        if (!ICentralAuthority(centralAuthority).hasRole(ORACLE_ROLE, msg.sender)) {
+            revert UnauthorizedCaller();
+        }
         _;
     }
 
@@ -190,13 +195,13 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
         string calldata telegram,
         string calldata discord
     ) external payable whenNotPaused {
-        if (profiles[msg.sender].isRegistered) revert InvalidTemplateId();
-        if (bytes(name).length == 0) revert InvalidTemplateId();
-        if (msg.value < registrationFee) revert InvalidTemplateId();
+        if (profiles[msg.sender].isRegistered) revert AlreadyRegistered();
+        if (bytes(name).length == 0) revert UnauthorizedCaller();
+        if (msg.value != registrationFee) revert InsufficientFee();
 
         if (registrationFee > 0) {
             (bool sent,) = feeRecipient.call{value: msg.value}("");
-            if (!sent) revert InvalidTemplateId();
+            if (!sent) revert UnauthorizedCaller();
         }
 
         profiles[msg.sender] = CreatorProfile({
@@ -240,8 +245,8 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
     }
 
     function verifyKYC(address creator) external onlyOracle {
-        if (!profiles[creator].isRegistered) revert InvalidTemplateId();
-        if (profiles[creator].kycVerified) revert InvalidTemplateId();
+        if (!profiles[creator].isRegistered) revert NotRegistered();
+        if (profiles[creator].kycVerified) revert AlreadyVerified();
 
         profiles[creator].kycVerified = true;
 
@@ -254,14 +259,6 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
     // Launch & Token Tracking
     // =============================================================
 
-    /**
-     * @dev Records a new launch for a creator (called by factory)
-     * @param creator Creator address
-     * @param launchId Unique launch ID
-     * @param bootstrapper Bootstrapper contract address
-     * @param token Token contract address
-     * @param targetLiquidityETH Target raise amount in ETH
-     */
     function recordLaunch(
         address creator,
         uint256 launchId,
@@ -269,8 +266,10 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
         address token,
         uint256 targetLiquidityETH
     ) external onlyFactory {
-        if (!profiles[creator].isRegistered) revert InvalidTemplateId();
-        if (blacklisted[creator]) revert InvalidTemplateId();
+        if (!profiles[creator].isRegistered) revert NotRegistered();
+        if (blacklisted[creator]) revert UnauthorizedCaller();
+
+        uint256 index = creatorLaunches[creator].length;
 
         LaunchRecord memory launch = LaunchRecord({
             launchId: launchId,
@@ -278,13 +277,14 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
             token: token,
             createdAt: block.timestamp,
             success: false,
+            finalized: false,
             targetLiquidityETH: targetLiquidityETH,
             raisedETH: 0
         });
 
         creatorLaunches[creator].push(launch);
+        launchIndexMap[creator][launchId] = index;
 
-        // Track token deployment
         TokenRecord memory tokenRec = TokenRecord({
             token: token,
             name: "",
@@ -300,90 +300,72 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
         emit LaunchRecorded(creator, launchId, bootstrapper, token, targetLiquidityETH);
     }
 
-    /**
-     * @dev Records launch success (called by factory)
-     * @param creator Creator address
-     * @param launchId Launch ID
-     * @param raisedETH Amount raised in ETH
-     */
     function recordLaunchSuccess(address creator, uint256 launchId, uint256 raisedETH) external onlyFactory {
-        LaunchRecord[] storage launches = creatorLaunches[creator];
-        for (uint256 i = 0; i < launches.length; i++) {
-            if (launches[i].launchId == launchId) {
-                launches[i].success = true;
-                launches[i].raisedETH = raisedETH;
-                profiles[creator].successfulLaunches++;
-                _updateReputation(creator, int256(SUCCESSFUL_LAUNCH_WEIGHT), "Successful launch");
-                break;
-            }
-        }
+        uint256 index = launchIndexMap[creator][launchId];
+        if (index >= creatorLaunches[creator].length) revert LaunchNotFound();
+
+        LaunchRecord storage launch = creatorLaunches[creator][index];
+        if (launch.finalized) revert LaunchAlreadyFinalized();
+
+        launch.success = true;
+        launch.finalized = true;
+        launch.raisedETH = raisedETH;
+
+        profiles[creator].successfulLaunches++;
+        _updateReputation(creator, int256(SUCCESSFUL_LAUNCH_WEIGHT), "Successful launch");
     }
 
-    /**
-     * @dev Records launch failure (called by factory)
-     * @param creator Creator address
-     * @param launchId Launch ID
-     */
     function recordLaunchFailure(address creator, uint256 launchId) external onlyFactory {
-        LaunchRecord[] storage launches = creatorLaunches[creator];
-        for (uint256 i = 0; i < launches.length; i++) {
-            if (launches[i].launchId == launchId) {
-                profiles[creator].failedLaunches++;
-                _updateReputation(creator, -int256(FAILED_LAUNCH_PENALTY), "Failed launch");
-                break;
-            }
-        }
+        uint256 index = launchIndexMap[creator][launchId];
+        if (index >= creatorLaunches[creator].length) revert LaunchNotFound();
+
+        LaunchRecord storage launch = creatorLaunches[creator][index];
+        if (launch.finalized) revert LaunchAlreadyFinalized();
+
+        launch.finalized = true;
+
+        profiles[creator].failedLaunches++;
+        _updateReputation(creator, -int256(FAILED_LAUNCH_PENALTY), "Failed launch");
     }
 
-    /**
-     * @dev Gets all launches by a creator
-     * @param creator Creator address
-     * @return Array of launch records
-     */
+    // =============================================================
+    // View Functions
+    // =============================================================
+
     function getCreatorLaunches(address creator) external view returns (LaunchRecord[] memory) {
         return creatorLaunches[creator];
     }
 
-    /**
-     * @dev Gets all tokens deployed by a creator
-     * @param creator Creator address
-     * @return Array of token records
-     */
     function getCreatorTokens(address creator) external view returns (TokenRecord[] memory) {
         return creatorTokens[creator];
     }
 
-    /**
-     * @dev Gets creator for a specific token
-     * @param token Token address
-     * @return Creator address
-     */
     function getTokenCreator(address token) external view returns (address) {
         return tokenToCreator[token];
     }
 
-    /**
-     * @dev Gets token count for a creator
-     * @param creator Creator address
-     * @return Number of tokens deployed
-     */
     function getCreatorTokenCount(address creator) external view returns (uint256) {
         return creatorTokens[creator].length;
     }
 
-    /**
-     * @dev Gets launch count for a creator
-     * @param creator Creator address
-     * @return Number of launches
-     */
     function getCreatorLaunchCount(address creator) external view returns (uint256) {
         return creatorLaunches[creator].length;
+    }
+
+    function getProfile(address creator) external view returns (CreatorProfile memory) {
+        return profiles[creator];
+    }
+
+    function isBlacklisted(address creator) external view returns (bool, string memory) {
+        return (blacklisted[creator], blacklistReason[creator]);
     }
 
     // =============================================================
     // Blacklist
     // =============================================================
     function blacklist(address creator, string calldata reason) external onlyGuardian {
+        if (blacklisted[creator]) revert AlreadyBlacklisted();
+
         blacklisted[creator] = true;
         blacklistReason[creator] = reason;
 
@@ -391,6 +373,8 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
     }
 
     function removeBlacklist(address creator) external onlyGuardian {
+        if (!blacklisted[creator]) revert NotBlacklisted();
+
         blacklisted[creator] = false;
         blacklistReason[creator] = "";
 
@@ -398,7 +382,7 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
     }
 
     // =============================================================
-    // Admin
+    // Admin Functions
     // =============================================================
     function setRegistrationFee(uint256 newFee) external onlyGuardian {
         emit RegistrationFeeUpdated(registrationFee, newFee);
@@ -406,13 +390,19 @@ contract CreatorProfileRegistry is Initializable, AccessControlUpgradeable, Paus
     }
 
     function setFeeRecipient(address newRecipient) external onlyGuardian {
-        if (newRecipient == address(0)) revert InvalidTemplateId();
+        if (newRecipient == address(0)) revert ZeroAddress();
         feeRecipient = newRecipient;
     }
 
     function setFactory(address newFactory) external onlyGuardian {
-        if (newFactory == address(0)) revert InvalidTemplateId();
+        if (newFactory == address(0)) revert ZeroAddress();
         factory = newFactory;
+    }
+
+    function setCentralAuthority(address newAuthority) external onlyGuardian {
+        if (newAuthority == address(0)) revert ZeroAddress();
+        emit CentralAuthorityUpdated(centralAuthority, newAuthority);
+        centralAuthority = newAuthority;
     }
 
     function pause() external onlyGuardian {

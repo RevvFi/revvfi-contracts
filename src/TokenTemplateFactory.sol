@@ -65,11 +65,11 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
 
     // Template ID → TemplateInfo
     mapping(bytes32 => TemplateInfo) public templates;
-    
+
     // Deployed token registry
     mapping(address => bool) public isFactoryToken;
     mapping(address => bytes32) public tokenTemplate;
-    
+
     // Template list for iteration (optional, for frontend)
     bytes32[] public templateIds;
 
@@ -88,21 +88,21 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
     );
 
     event TemplateAdded(
-        bytes32 indexed templateId, 
-        address indexed implementation, 
+        bytes32 indexed templateId,
+        address indexed implementation,
         uint64 version,
         string metadataURI,
         bytes32 auditHash
     );
-    
+
     event TemplateRemoved(bytes32 indexed templateId);
     event TemplateUpdated(
-        bytes32 indexed templateId, 
-        address indexed oldImplementation, 
+        bytes32 indexed templateId,
+        address indexed oldImplementation,
         address indexed newImplementation,
         uint64 newVersion
     );
-    
+
     event TemplateActivated(bytes32 indexed templateId);
     event TemplateDeactivated(bytes32 indexed templateId);
     event FactoryPaused(address indexed executor);
@@ -136,7 +136,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
         if (templates[templateId].implementation == address(0)) revert TemplateNotFound();
         _;
     }
-    
+
     modifier templateActive(bytes32 templateId) {
         if (!templates[templateId].active) revert TemplateNotFound();
         _;
@@ -155,8 +155,8 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
      * @param auditHash Hash of audit report for verification
      */
     function addTemplate(
-        bytes32 templateId, 
-        address implementation, 
+        bytes32 templateId,
+        address implementation,
         uint64 version,
         string calldata metadataURI,
         bytes32 auditHash
@@ -173,7 +173,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
             auditHash: auditHash,
             addedAt: block.timestamp
         });
-        
+
         templateIds.push(templateId);
 
         emit TemplateAdded(templateId, implementation, version, metadataURI, auditHash);
@@ -186,7 +186,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
     function removeTemplate(bytes32 templateId) external onlyDAO templateExists(templateId) {
         // Don't delete, just deactivate
         templates[templateId].active = false;
-        
+
         // Remove from templateIds array (inefficient but acceptable for governance operations)
         for (uint256 i = 0; i < templateIds.length; i++) {
             if (templateIds[i] == templateId) {
@@ -195,7 +195,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
                 break;
             }
         }
-        
+
         emit TemplateRemoved(templateId);
     }
 
@@ -208,8 +208,8 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
      * @param newAuditHash New audit hash (optional, can be empty)
      */
     function updateTemplate(
-        bytes32 templateId, 
-        address newImplementation, 
+        bytes32 templateId,
+        address newImplementation,
         uint64 newVersion,
         string calldata newMetadataURI,
         bytes32 newAuditHash
@@ -217,7 +217,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
         if (newImplementation == address(0)) revert ZeroAddress();
 
         address oldImplementation = templates[templateId].implementation;
-        
+
         templates[templateId].implementation = newImplementation;
         templates[templateId].version = newVersion;
         if (bytes(newMetadataURI).length > 0) {
@@ -229,7 +229,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
 
         emit TemplateUpdated(templateId, oldImplementation, newImplementation, newVersion);
     }
-    
+
     /**
      * @dev Activates or deactivates a template
      * @param templateId Template ID
@@ -275,7 +275,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
         } else {
             token = Clones.cloneDeterministic(template.implementation, salt);
         }
-        
+
         if (token == address(0)) revert DeploymentFailed();
 
         // Initialize the token
@@ -335,7 +335,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
         bytes32 emptySalt;
         return _deployToken(name, symbol, totalSupply, templateId, receiver, emptyBytes, emptySalt);
     }
-    
+
     /**
      * @dev Deploys a token with deterministic address using CREATE2
      * @param salt Salt for CREATE2 address calculation
@@ -351,15 +351,15 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
     ) external nonReentrant whenNotPaused returns (address token) {
         return _deployToken(name, symbol, totalSupply, templateId, receiver, initData, salt);
     }
-    
+
     /**
      * @dev Predicts deterministic token address before deployment
      */
-    function predictDeterministicAddress(
-        bytes32 templateId,
-        bytes32 salt,
-        address deployer
-    ) external view returns (address) {
+    function predictDeterministicAddress(bytes32 templateId, bytes32 salt, address deployer)
+        external
+        view
+        returns (address)
+    {
         address implementation = templates[templateId].implementation;
         if (implementation == address(0)) revert TemplateNotFound();
         return Clones.predictDeterministicAddress(implementation, salt, deployer);
@@ -375,14 +375,14 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
     function isTemplateExists(bytes32 templateId) external view returns (bool) {
         return templates[templateId].implementation != address(0) && templates[templateId].active;
     }
-    
+
     /**
      * @dev Returns whether a token was deployed by this factory
      */
     function isOfficialToken(address token) external view returns (bool) {
         return isFactoryToken[token];
     }
-    
+
     /**
      * @dev Returns template ID for a token
      */
@@ -396,14 +396,14 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
     function getTemplate(bytes32 templateId) external view returns (TemplateInfo memory) {
         return templates[templateId];
     }
-    
+
     /**
      * @dev Returns all template IDs
      */
     function getAllTemplateIds() external view returns (bytes32[] memory) {
         return templateIds;
     }
-    
+
     /**
      * @dev Returns number of templates
      */
@@ -422,7 +422,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
         _pause();
         emit FactoryPaused(msg.sender);
     }
-    
+
     /**
      * @dev Unpause deployment
      */
@@ -442,10 +442,9 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
 
-        (bool success, bytes memory data) = token.call(
-            abi.encodeWithSignature("transfer(address,uint256)", recipient, amount)
-        );
-        
+        (bool success, bytes memory data) =
+            token.call(abi.encodeWithSignature("transfer(address,uint256)", recipient, amount));
+
         // Handle different ERC20 return value formats
         if (!success) revert DeploymentFailed();
         if (data.length > 0) {
@@ -453,7 +452,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
             if (!result) revert DeploymentFailed();
         }
     }
-    
+
     /**
      * @dev Batch add multiple templates at once
      */
@@ -466,7 +465,7 @@ contract TokenTemplateFactory is ReentrancyGuard, AccessControl, Pausable {
     ) external onlyDAO {
         if (templateIds.length != implementations.length) revert InvalidTemplateId();
         if (templateIds.length != versions.length) revert InvalidTemplateId();
-        
+
         for (uint256 i = 0; i < templateIds.length; i++) {
             addTemplate(templateIds[i], implementations[i], versions[i], metadataURIs[i], auditHashes[i]);
         }

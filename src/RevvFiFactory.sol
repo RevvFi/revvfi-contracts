@@ -422,7 +422,8 @@ contract RevvFiFactory is Initializable, AccessControlUpgradeable, PausableUpgra
     }
 
     function _deployRewardsDistributor(address token) internal returns (address) {
-        address distributor = address(new RewardsDistributor(token, address(this), platformFeeRecipient));
+        address distributor =
+            address(new RewardsDistributor(token, address(this), platformFeeRecipient, centralAuthority));
         emit RewardsDistributorDeployed(distributor);
         return distributor;
     }
