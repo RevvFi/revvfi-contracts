@@ -14,8 +14,6 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
         uint256 apr;
         uint8 seniority;
         uint256 startTime;
-        uint256 lastAccrualTime;
-        uint256 accruedInterest;
         bool active;
         bool isSenior;
     }
@@ -56,11 +54,13 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
         emit RevvFiEvents.MarketUnregistered(market);
     }
 
-    function mintPosition(address lender, address market, uint256 principal, uint256 apr, uint8 seniority)
-        external
-        onlyApprovedMarket
-        returns (uint256 tokenId)
-    {
+    function mintPosition(
+        address lender,
+        address market,
+        uint256 principal,
+        uint256 apr,
+        uint8 seniority
+    ) external onlyApprovedMarket returns (uint256 tokenId) {
         tokenId = _nextTokenId;
         _nextTokenId++;
 
@@ -71,8 +71,6 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
             apr: apr,
             seniority: seniority,
             startTime: block.timestamp,
-            lastAccrualTime: block.timestamp,
-            accruedInterest: 0,
             active: true,
             isSenior: seniority == 0
         });
@@ -111,51 +109,14 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
         return ownerOf(tokenId);
     }
 
-    function addAccruedInterest(uint256 tokenId, uint256 amount) external onlyApprovedMarket {
-        Position storage pos = positions[tokenId];
-        if (!pos.active) revert RevvFiErrors.PositionNotFound();
-        pos.accruedInterest += amount;
-        pos.lastAccrualTime = block.timestamp;
-    }
-
-    function updateLastAccrualTime(uint256 tokenId) external onlyApprovedMarket {
-        Position storage pos = positions[tokenId];
-        if (!pos.active) revert RevvFiErrors.PositionNotFound();
-        pos.lastAccrualTime = block.timestamp;
-    }
-
-    function claimInterest(uint256 tokenId) external returns (uint256 amount) {
-        address lender = ownerOf(tokenId);
-        if (lender != msg.sender) revert RevvFiErrors.UnauthorizedCaller();
-
-        Position storage pos = positions[tokenId];
-        if (!pos.active) revert RevvFiErrors.PositionNotFound();
-
-        amount = pos.accruedInterest;
-        if (amount == 0) revert RevvFiErrors.PositionNotFound();
-
-        pos.accruedInterest = 0;
-        emit RevvFiEvents.InterestClaimed(tokenId, lender, amount);
-        return amount;
-    }
-
-    function getAccruedInterest(uint256 tokenId) external view returns (uint256) {
-        Position storage pos = positions[tokenId];
-        if (!pos.active) return 0;
-        return pos.accruedInterest;
-    }
-
-    function redeemPosition(uint256 tokenId, uint256 principalAmount, uint256 interestAmount)
-        external
-        onlyApprovedMarket
-    {
+    function redeemPosition(uint256 tokenId) external onlyApprovedMarket {
         Position storage pos = positions[tokenId];
         if (!pos.active) revert RevvFiErrors.PositionNotFound();
 
         pos.active = false;
         _burn(tokenId);
 
-        emit RevvFiEvents.PositionRedeemed(tokenId, principalAmount, interestAmount);
+        emit RevvFiEvents.PositionRedeemed(tokenId, pos.principal, 0);
     }
 
     function getPosition(uint256 tokenId) external view returns (Position memory) {

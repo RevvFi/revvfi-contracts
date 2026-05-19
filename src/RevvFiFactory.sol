@@ -57,14 +57,25 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         (bool feeSent,) = feeRecipient.call{value: deploymentFee}("");
         if (!feeSent) revert RevvFiErrors.FeeTransferFailed();
 
-        RevvFiMarket market =
-            new RevvFiMarket(address(this), address(archController), borrower, borrowAsset, collateralAsset);
+        RevvFiMarket market = new RevvFiMarket(
+            address(this),
+            address(archController),
+            borrower,
+            borrowAsset,
+            collateralAsset
+        );
 
         marketAddress = address(market);
 
         RevvFiCollateralEscrow collateralEscrow = new RevvFiCollateralEscrow(address(this));
         collateralEscrow.initialize(
-            marketAddress, borrowAsset, collateralAsset, collateralOracle, collateralDecimals, borrowDecimals
+            marketAddress,
+            borrower,  // Pass borrower address here
+            borrowAsset,
+            collateralAsset,
+            collateralOracle,
+            collateralDecimals,
+            borrowDecimals
         );
         collateralEscrow.setMinCollateralRatio(minCollateralRatio);
         collateralEscrow.setLiquidationThreshold(liquidationThreshold);

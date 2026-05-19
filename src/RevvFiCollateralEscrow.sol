@@ -19,6 +19,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
 
     address public immutable factory;
     address public market;
+    address public borrower;  // ADDED: store borrower address
     address public borrowAsset;
     address public collateralAsset;
 
@@ -34,8 +35,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
     uint256 public liquidationThreshold;
 
     bool public isInitialized;
-    bool public isLiquidating;
-    address public liquidatingBorrower;
+    bool public liquidationActive; // Simplified - only one borrower per market
 
     modifier onlyMarket() {
         if (msg.sender != market) revert RevvFiErrors.UnauthorizedCaller();
@@ -48,7 +48,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
     }
 
     modifier notLiquidating() {
-        if (isLiquidating) revert RevvFiErrors.AlreadyLiquidating();
+        if (liquidationActive) revert RevvFiErrors.AlreadyLiquidating();
         _;
     }
 
@@ -58,11 +58,12 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         minCollateralRatio = DEFAULT_MIN_COLLATERAL_RATIO;
         liquidationThreshold = DEFAULT_LIQUIDATION_THRESHOLD;
         isInitialized = false;
-        isLiquidating = false;
+        liquidationActive = false;
     }
 
     function initialize(
         address _market,
+        address _borrower,
         address _borrowAsset,
         address _collateralAsset,
         address _collateralOracle,
@@ -71,6 +72,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
     ) external onlyFactory {
         if (isInitialized) revert RevvFiErrors.AlreadyInitialized();
         if (_market == address(0)) revert RevvFiErrors.ZeroAddress();
+        if (_borrower == address(0)) revert RevvFiErrors.ZeroAddress();
         if (_borrowAsset == address(0)) revert RevvFiErrors.ZeroAddress();
         if (_collateralAsset == address(0)) revert RevvFiErrors.ZeroAddress();
         if (_collateralOracle == address(0)) revert RevvFiErrors.OracleNotSet();
@@ -78,6 +80,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         if (_borrowDecimals == 0 || _borrowDecimals > 18) revert RevvFiErrors.InvalidDecimals();
 
         market = _market;
+        borrower = _borrower;
         borrowAsset = _borrowAsset;
         collateralAsset = _collateralAsset;
         collateralOracle = _collateralOracle;
@@ -89,43 +92,43 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         isInitialized = true;
     }
 
-    function depositCollateral(address borrower, uint256 amount) external onlyMarket nonReentrant notLiquidating {
-        if (borrower == address(0)) revert RevvFiErrors.ZeroAddress();
+    function depositCollateral(address borrowerAddr, uint256 amount) external onlyMarket nonReentrant notLiquidating {
+        if (borrowerAddr == address(0)) revert RevvFiErrors.ZeroAddress();
         if (amount == 0) revert RevvFiErrors.ZeroAmount();
 
         IERC20 token = IERC20(collateralAsset);
-        token.safeTransferFrom(borrower, address(this), amount);
+        token.safeTransferFrom(borrowerAddr, address(this), amount);
 
-        collateralBalance[borrower] += amount;
+        collateralBalance[borrowerAddr] += amount;
         totalCollateral += amount;
 
-        emit RevvFiEvents.CollateralDeposited(borrower, amount);
+        emit RevvFiEvents.CollateralDeposited(borrowerAddr, amount);
     }
 
-    function withdrawCollateral(address borrower, uint256 amount, uint256 currentDebt)
+    function withdrawCollateral(address borrowerAddr, uint256 amount, uint256 currentDebt)
         external
         onlyMarket
         nonReentrant
         notLiquidating
     {
-        if (borrower == address(0)) revert RevvFiErrors.ZeroAddress();
+        if (borrowerAddr == address(0)) revert RevvFiErrors.ZeroAddress();
         if (amount == 0) revert RevvFiErrors.ZeroAmount();
-        if (collateralBalance[borrower] < amount) revert RevvFiErrors.InsufficientCollateral();
+        if (collateralBalance[borrowerAddr] < amount) revert RevvFiErrors.InsufficientCollateral();
 
-        uint256 newBalance = collateralBalance[borrower] - amount;
+        uint256 newBalance = collateralBalance[borrowerAddr] - amount;
         if (currentDebt > 0) {
             uint256 valueAfter = _getCollateralValueFromAmount(newBalance);
             uint256 ratio = (valueAfter * BASIS_POINTS) / currentDebt;
             if (ratio < minCollateralRatio) revert RevvFiErrors.InsufficientCollateral();
         }
 
-        collateralBalance[borrower] = newBalance;
+        collateralBalance[borrowerAddr] = newBalance;
         totalCollateral -= amount;
 
         IERC20 token = IERC20(collateralAsset);
-        token.safeTransfer(borrower, amount);
+        token.safeTransfer(borrowerAddr, amount);
 
-        emit RevvFiEvents.CollateralWithdrawn(borrower, amount);
+        emit RevvFiEvents.CollateralWithdrawn(borrowerAddr, amount);
     }
 
     function _getCollateralValueFromAmount(uint256 amount) internal view returns (uint256 valueInBorrowAsset) {
@@ -146,14 +149,14 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         valueInBorrowAsset = valueInBorrowAsset / denominator;
     }
 
-    function getCollateralRatio(address borrower, uint256 debt) external view returns (uint256) {
+    function getCollateralRatio(address borrowerAddr, uint256 debt) external view returns (uint256) {
         if (debt == 0) return type(uint256).max;
-        uint256 collateralValue = _getCollateralValueFromAmount(collateralBalance[borrower]);
+        uint256 collateralValue = _getCollateralValueFromAmount(collateralBalance[borrowerAddr]);
         return (collateralValue * BASIS_POINTS) / debt;
     }
 
-    function _getCollateralValue(address borrower) internal view returns (uint256 valueInBorrowAsset, uint256 amount) {
-        amount = collateralBalance[borrower];
+    function _getCollateralValue(address borrowerAddr) internal view returns (uint256 valueInBorrowAsset, uint256 amount) {
+        amount = collateralBalance[borrowerAddr];
         valueInBorrowAsset = _getCollateralValueFromAmount(amount);
     }
 
@@ -168,71 +171,66 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         return uint256(price);
     }
 
-    function isHealthy(address borrower, uint256 debt) external view returns (bool) {
+    function isHealthy(address borrowerAddr, uint256 debt) external view returns (bool) {
         if (debt == 0) return true;
-        uint256 collateralValue = _getCollateralValueFromAmount(collateralBalance[borrower]);
+        uint256 collateralValue = _getCollateralValueFromAmount(collateralBalance[borrowerAddr]);
         uint256 ratio = (collateralValue * BASIS_POINTS) / debt;
         return ratio >= minCollateralRatio;
     }
 
-    function isLiquidatable(address borrower, uint256 debt) public view returns (bool) {
+    function isLiquidatable(address borrowerAddr, uint256 debt) public view returns (bool) {
         if (debt == 0) return false;
-        uint256 collateralValue = _getCollateralValueFromAmount(collateralBalance[borrower]);
+        uint256 collateralValue = _getCollateralValueFromAmount(collateralBalance[borrowerAddr]);
         uint256 ratio = (collateralValue * BASIS_POINTS) / debt;
         return ratio < liquidationThreshold;
     }
 
-    function getMaxBorrowable(address borrower) external view returns (uint256) {
-        uint256 collateralValue = _getCollateralValueFromAmount(collateralBalance[borrower]);
+    function getMaxBorrowable(address borrowerAddr) external view returns (uint256) {
+        uint256 collateralValue = _getCollateralValueFromAmount(collateralBalance[borrowerAddr]);
         if (collateralValue == 0) return 0;
         return (collateralValue * BASIS_POINTS) / minCollateralRatio;
     }
 
-    function startLiquidation(address borrower) external onlyMarket notLiquidating {
-        if (!isLiquidatable(borrower, IRevvFiMarket(market).getTotalOwed())) {
-            revert RevvFiErrors.InsufficientCollateral();
-        }
-        isLiquidating = true;
-        liquidatingBorrower = borrower;
+    function startLiquidation() external onlyMarket notLiquidating {
+        liquidationActive = true;
         emit RevvFiEvents.LiquidationStarted(borrower);
     }
 
     function endLiquidation() external onlyMarket {
-        isLiquidating = false;
-        liquidatingBorrower = address(0);
-        emit RevvFiEvents.LiquidationEnded(liquidatingBorrower);
+        liquidationActive = false;
+        emit RevvFiEvents.LiquidationEnded(borrower);
     }
 
-    function liquidate(address borrower, uint256 collateralToSeize, uint256 debtToCover, address liquidator)
+    function liquidate(address borrowerAddr, uint256 collateralToSeize, uint256 debtToCover, address liquidatorAddr)
         external
         onlyMarket
         nonReentrant
         returns (uint256 collateralAmount, uint256 debtAmount)
     {
-        if (!isLiquidating || liquidatingBorrower != borrower) revert RevvFiErrors.UnauthorizedCaller();
-        if (collateralBalance[borrower] < collateralToSeize) revert RevvFiErrors.InsufficientCollateral();
+        if (!liquidationActive) revert RevvFiErrors.UnauthorizedCaller();
+        if (collateralBalance[borrowerAddr] < collateralToSeize) revert RevvFiErrors.InsufficientCollateral();
 
-        collateralBalance[borrower] -= collateralToSeize;
+        collateralBalance[borrowerAddr] -= collateralToSeize;
         totalCollateral -= collateralToSeize;
 
         IERC20 token = IERC20(collateralAsset);
-        token.safeTransfer(liquidator, collateralToSeize);
+        token.safeTransfer(liquidatorAddr, collateralToSeize);
 
-        emit RevvFiEvents.CollateralLiquidated(borrower, collateralToSeize, debtToCover);
+        emit RevvFiEvents.CollateralLiquidated(borrowerAddr, collateralToSeize, debtToCover);
 
         return (collateralToSeize, debtToCover);
     }
 
-    function getCollateralBalance(address borrower) external view returns (uint256) {
-        return collateralBalance[borrower];
+    function getCollateralBalance(address borrowerAddr) external view returns (uint256) {
+        return collateralBalance[borrowerAddr];
     }
 
-    function getCollateralValue(address borrower) external view returns (uint256 value, uint256 amount) {
-        return _getCollateralValue(borrower);
+    function getCollateralValue(address borrowerAddr) external view returns (uint256 value, uint256 amount) {
+        return _getCollateralValue(borrowerAddr);
     }
 
-    function isLiquidationActive() external view returns (bool, address) {
-        return (isLiquidating, liquidatingBorrower);
+    function isLiquidationActive() external view returns (bool) {
+        return liquidationActive;
     }
 
     function setMinCollateralRatio(uint256 newRatio) external onlyFactory {

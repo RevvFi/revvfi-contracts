@@ -31,5 +31,5 @@ interface IRevvFiLiquidator {
     function cancelAuction(uint256 auctionId) external;
     function getAuction(uint256 auctionId) external view returns (Auction memory);
     function getWinningBid(uint256 auctionId) external view returns (address, uint256, uint256);
-    function receiveCollateral(uint256 auctionId, uint256 amount) external;
+    function receiveCollateral(uint256 auctionId) external;
 }
