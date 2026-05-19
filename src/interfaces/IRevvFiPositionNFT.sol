@@ -16,7 +16,9 @@ interface IRevvFiPositionNFT {
         bool isSenior;
     }
 
-    function mintPosition(address lender, address market, uint256 principal, uint256 apr, uint8 seniority) external returns (uint256);
+    function mintPosition(address lender, address market, uint256 principal, uint256 apr, uint8 seniority)
+        external
+        returns (uint256);
     function updateInterest(uint256 tokenId) external returns (uint256);
     function claimInterest(uint256 tokenId) external returns (uint256);
     function redeemPosition(uint256 tokenId, uint256 principalAmount, uint256 interestAmount) external;
@@ -25,7 +27,7 @@ interface IRevvFiPositionNFT {
     function getPosition(uint256 tokenId) external view returns (Position memory);
     function getLenderPositions(address lender) external view returns (uint256[] memory);
     function ownerOf(uint256 tokenId) external view returns (address);
-    
+
     // Additional functions needed by RevvFiMarket
     function registerMarket(address market) external;
     function addAccruedInterest(uint256 tokenId, uint256 amount) external;

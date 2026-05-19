@@ -19,4 +19,5 @@ interface IRevvFiMarket {
     function isHealthy() external view returns (bool);
     function isLiquidatable() external view returns (bool);
     function getMaxBorrowable() external view returns (uint256);
+    function getTotalOwed() external view returns (uint256);
 }

@@ -5,35 +5,11 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IRevvFiOfferBook.sol";
+import "./libraries/RevvFiErrors.sol";
+import "./libraries/RevvFiEvents.sol";
 
 contract RevvFiOfferBook is ReentrancyGuard {
     using SafeERC20 for IERC20;
-
-    error ZeroAddress();
-    error ZeroAmount();
-    error ZeroApr();
-    error OfferNotFound();
-    error OfferExpired();
-    error OfferNotActive();
-    error InsufficientOfferAmount();
-    error UnauthorizedCaller();
-    error InvalidSeniority();
-    error InsufficientLiquidity();
-    error MaxOffersExceeded();
-    error NoActiveOffers();
-    error MaxIterationsExceeded();
-
-    event OfferSubmitted(
-        uint256 indexed offerId,
-        address indexed lender,
-        uint256 amount,
-        uint256 apr,
-        uint8 seniority,
-        uint256 expiry
-    );
-    event OfferCancelled(uint256 indexed offerId, address indexed lender);
-    event OfferFilled(uint256 indexed offerId, address indexed lender, uint256 amountFilled);
-    event DrawdownExecuted(address indexed borrower, uint256 totalAmount, uint256 weightedApr);
 
     struct Offer {
         uint256 id;
@@ -49,7 +25,7 @@ contract RevvFiOfferBook is ReentrancyGuard {
 
     uint256 public constant MAX_OFFERS_PER_LENDER = 20;
     uint256 public constant MAX_ACTIVE_OFFERS_GLOBAL = 500;
-    uint256 public constant MIN_OFFER_AMOUNT = 100e6; // 100 USDC for 6 decimal tokens
+    uint256 public constant MIN_OFFER_AMOUNT = 100e6;
     uint256 public constant MAX_ITERATIONS = 100;
 
     address public immutable factory;
@@ -59,29 +35,28 @@ contract RevvFiOfferBook is ReentrancyGuard {
     mapping(uint256 => Offer) public offers;
     mapping(address => uint256[]) public lenderOfferIds;
     mapping(uint256 => bool) public isActiveOffer;
-    
+
     uint256 public nextOfferId;
     uint256 public totalLiquidityAvailable;
     uint256 public activeOfferCount;
 
-    // Circular buffer for active offers to avoid unbounded growth
     uint256[] private _activeOfferIds;
-    mapping(uint256 => uint256) private _activeOfferIndex; // offerId -> index in _activeOfferIds
+    mapping(uint256 => uint256) private _activeOfferIndex;
 
     bool public isInitialized;
 
     modifier onlyMarket() {
-        if (msg.sender != market) revert UnauthorizedCaller();
+        if (msg.sender != market) revert RevvFiErrors.UnauthorizedCaller();
         _;
     }
 
     modifier onlyFactory() {
-        if (msg.sender != factory) revert UnauthorizedCaller();
+        if (msg.sender != factory) revert RevvFiErrors.UnauthorizedCaller();
         _;
     }
 
     constructor(address _factory) {
-        if (_factory == address(0)) revert ZeroAddress();
+        if (_factory == address(0)) revert RevvFiErrors.ZeroAddress();
         factory = _factory;
         nextOfferId = 1;
         isInitialized = false;
@@ -89,9 +64,9 @@ contract RevvFiOfferBook is ReentrancyGuard {
     }
 
     function initialize(address _market, address _borrowAsset) external onlyFactory {
-        if (isInitialized) revert UnauthorizedCaller();
-        if (_market == address(0)) revert ZeroAddress();
-        if (_borrowAsset == address(0)) revert ZeroAddress();
+        if (isInitialized) revert RevvFiErrors.UnauthorizedCaller();
+        if (_market == address(0)) revert RevvFiErrors.ZeroAddress();
+        if (_borrowAsset == address(0)) revert RevvFiErrors.ZeroAddress();
 
         market = _market;
         borrowAsset = _borrowAsset;
@@ -107,32 +82,31 @@ contract RevvFiOfferBook is ReentrancyGuard {
 
     function _removeFromActiveList(uint256 offerId) internal {
         if (!isActiveOffer[offerId]) return;
-        
+
         uint256 index = _activeOfferIndex[offerId];
         uint256 lastId = _activeOfferIds[_activeOfferIds.length - 1];
-        
+
         _activeOfferIds[index] = lastId;
         _activeOfferIndex[lastId] = index;
         _activeOfferIds.pop();
-        
+
         delete _activeOfferIndex[offerId];
         isActiveOffer[offerId] = false;
         activeOfferCount--;
     }
 
-    function submitOffer(
-        uint256 amount,
-        uint256 apr,
-        uint8 seniority,
-        uint256 duration
-    ) external nonReentrant returns (uint256 offerId) {
-        if (amount == 0) revert ZeroAmount();
-        if (amount < MIN_OFFER_AMOUNT) revert ZeroAmount();
-        if (apr == 0) revert ZeroApr();
-        if (seniority > 1) revert InvalidSeniority();
-        if (duration == 0) revert ZeroAmount();
-        if (activeOfferCount >= MAX_ACTIVE_OFFERS_GLOBAL) revert MaxOffersExceeded();
-        if (lenderOfferIds[msg.sender].length >= MAX_OFFERS_PER_LENDER) revert MaxOffersExceeded();
+    function submitOffer(uint256 amount, uint256 apr, uint8 seniority, uint256 duration)
+        external
+        nonReentrant
+        returns (uint256 offerId)
+    {
+        if (amount == 0) revert RevvFiErrors.ZeroAmount();
+        if (amount < MIN_OFFER_AMOUNT) revert RevvFiErrors.ZeroAmount();
+        if (apr == 0) revert RevvFiErrors.ZeroApr();
+        if (seniority > 1) revert RevvFiErrors.InvalidSeniority();
+        if (duration == 0) revert RevvFiErrors.ZeroAmount();
+        if (activeOfferCount >= MAX_ACTIVE_OFFERS_GLOBAL) revert RevvFiErrors.MaxOffersExceeded();
+        if (lenderOfferIds[msg.sender].length >= MAX_OFFERS_PER_LENDER) revert RevvFiErrors.MaxOffersExceeded();
 
         IERC20 token = IERC20(borrowAsset);
         token.safeTransferFrom(msg.sender, address(this), amount);
@@ -155,13 +129,13 @@ contract RevvFiOfferBook is ReentrancyGuard {
         _addToActiveList(offerId);
         totalLiquidityAvailable += amount;
 
-        emit OfferSubmitted(offerId, msg.sender, amount, apr, seniority, block.timestamp + duration);
+        emit RevvFiEvents.OfferSubmitted(offerId, msg.sender, amount, apr, seniority, block.timestamp + duration);
     }
 
     function cancelOffer(uint256 offerId) external nonReentrant {
         Offer storage offer = offers[offerId];
-        if (offer.lender != msg.sender) revert UnauthorizedCaller();
-        if (!offer.active) revert OfferNotActive();
+        if (offer.lender != msg.sender) revert RevvFiErrors.UnauthorizedCaller();
+        if (!offer.active) revert RevvFiErrors.OfferNotActive();
 
         offer.active = false;
         _removeFromActiveList(offerId);
@@ -173,19 +147,20 @@ contract RevvFiOfferBook is ReentrancyGuard {
             offer.remainingAmount = 0;
         }
 
-        emit OfferCancelled(offerId, msg.sender);
+        emit RevvFiEvents.OfferCancelled(offerId, msg.sender);
     }
 
     function _getActiveOffers() internal view returns (uint256[] memory) {
         return _activeOfferIds;
     }
 
-    function getBestOffers(
-        uint256 amount,
-        bool useSeniorOnly
-    ) public view returns (Offer[] memory bestOffers, uint256 totalAvailable, uint256 weightedApr) {
+    function getBestOffers(uint256 amount, bool useSeniorOnly)
+        public
+        view
+        returns (Offer[] memory bestOffers, uint256 totalAvailable, uint256 weightedApr)
+    {
         uint256[] memory activeIds = _getActiveOffers();
-        
+
         if (activeIds.length == 0) {
             bestOffers = new Offer[](0);
             totalAvailable = 0;
@@ -195,7 +170,7 @@ contract RevvFiOfferBook is ReentrancyGuard {
 
         Offer[] memory tempOffers = new Offer[](activeIds.length);
         uint256 validCount = 0;
-        
+
         uint256 iterations = 0;
         for (uint256 i = 0; i < activeIds.length && iterations < MAX_ITERATIONS; i++) {
             iterations++;
@@ -208,9 +183,8 @@ contract RevvFiOfferBook is ReentrancyGuard {
             }
         }
 
-        if (validCount == 0) revert NoActiveOffers();
+        if (validCount == 0) revert RevvFiErrors.NoActiveOffers();
 
-        // Simple selection sort (bounded by MAX_ACTIVE_OFFERS_GLOBAL=500)
         for (uint256 i = 0; i < validCount; i++) {
             uint256 minIdx = i;
             for (uint256 j = i + 1; j < validCount; j++) {
@@ -263,16 +237,19 @@ contract RevvFiOfferBook is ReentrancyGuard {
         return (bestOffers, amount, weightedApr);
     }
 
-    function executeDrawdown(
-        uint256 amount,
-        bool useSeniorOnly
-    ) external onlyMarket nonReentrant returns (IRevvFiOfferBook.Offer[] memory filledOffers, uint256 weightedApr) {
-        (Offer[] memory offersToFill, uint256 totalAvailable, uint256 computedApr) = getBestOffers(amount, useSeniorOnly);
+    function executeDrawdown(uint256 amount, bool useSeniorOnly)
+        external
+        onlyMarket
+        nonReentrant
+        returns (IRevvFiOfferBook.Offer[] memory filledOffers, uint256 weightedApr)
+    {
+        (Offer[] memory offersToFill, uint256 totalAvailable, uint256 computedApr) =
+            getBestOffers(amount, useSeniorOnly);
 
-        if (totalAvailable < amount) revert InsufficientOfferAmount();
+        if (totalAvailable < amount) revert RevvFiErrors.InsufficientOfferAmount();
 
         weightedApr = computedApr;
-        
+
         IRevvFiOfferBook.Offer[] memory result = new IRevvFiOfferBook.Offer[](offersToFill.length);
 
         for (uint256 i = 0; i < offersToFill.length; i++) {
@@ -302,10 +279,10 @@ contract RevvFiOfferBook is ReentrancyGuard {
                 _removeFromActiveList(offer.id);
             }
 
-            emit OfferFilled(offer.id, offer.lender, amountToTake);
+            emit RevvFiEvents.OfferFilled(offer.id, offer.lender, amountToTake);
         }
 
-        emit DrawdownExecuted(msg.sender, amount, weightedApr);
+        emit RevvFiEvents.DrawdownExecutedOffer(msg.sender, amount, weightedApr);
 
         return (result, weightedApr);
     }

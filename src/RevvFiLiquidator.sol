@@ -4,48 +4,11 @@ pragma solidity 0.8.33;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./libraries/RevvFiErrors.sol";
+import "./libraries/RevvFiEvents.sol";
 
 contract RevvFiLiquidator is ReentrancyGuard {
     using SafeERC20 for IERC20;
-
-    error ZeroAddress();
-    error ZeroAmount();
-    error AuctionNotFound();
-    error AuctionNotActive();
-    error AuctionEnded();
-    error BidTooLow();
-    error UnauthorizedCaller();
-    error AuctionAlreadySettled();
-    error NoBids();
-    error LiquidationNotActive();
-    error TransferFailed();
-
-    event AuctionCreated(
-        uint256 indexed auctionId,
-        address indexed market,
-        address indexed borrower,
-        address borrowAsset,
-        address collateralAsset,
-        uint256 collateralAmount,
-        uint256 debtAmount,
-        uint256 startTime,
-        uint256 endTime
-    );
-    event BidPlaced(
-        uint256 indexed auctionId,
-        address indexed bidder,
-        uint256 bidAmount,
-        uint256 collateralAmount
-    );
-    event AuctionSettled(
-        uint256 indexed auctionId,
-        address indexed winner,
-        address collateralAsset,
-        uint256 collateralAmount,
-        uint256 bidAmount,
-        uint256 debtRepaid
-    );
-    event AuctionCancelled(uint256 indexed auctionId);
 
     struct Auction {
         uint256 id;
@@ -72,12 +35,12 @@ contract RevvFiLiquidator is ReentrancyGuard {
     uint256 public auctionExtensionWindow = 15 minutes;
 
     modifier onlyFactory() {
-        if (msg.sender != factory) revert UnauthorizedCaller();
+        if (msg.sender != factory) revert RevvFiErrors.UnauthorizedCaller();
         _;
     }
 
     constructor(address _factory) {
-        if (_factory == address(0)) revert ZeroAddress();
+        if (_factory == address(0)) revert RevvFiErrors.ZeroAddress();
         factory = _factory;
         nextAuctionId = 1;
     }
@@ -109,7 +72,7 @@ contract RevvFiLiquidator is ReentrancyGuard {
             collateralTransferred: false
         });
 
-        emit AuctionCreated(
+        emit RevvFiEvents.AuctionCreated(
             auctionId,
             market,
             borrower,
@@ -124,29 +87,29 @@ contract RevvFiLiquidator is ReentrancyGuard {
 
     function receiveCollateral(uint256 auctionId) external onlyFactory {
         Auction storage auction = auctions[auctionId];
-        if (!auction.active) revert AuctionNotFound();
+        if (!auction.active) revert RevvFiErrors.AuctionNotFound();
         auction.collateralTransferred = true;
     }
 
     function placeBid(uint256 auctionId, uint256 bidAmount) external nonReentrant {
         Auction storage auction = auctions[auctionId];
-        if (!auction.active) revert AuctionNotFound();
-        if (block.timestamp > auction.endTime) revert AuctionEnded();
-        
-        uint256 minBid = auction.highestBid == 0 
-            ? 1 
-            : auction.highestBid + (auction.highestBid * minBidIncrementBps / 10000);
-        if (bidAmount < minBid) revert BidTooLow();
-        if (bidAmount > auction.debtAmount) revert BidTooLow();
+        if (!auction.active) revert RevvFiErrors.AuctionNotFound();
+        if (block.timestamp > auction.endTime) revert RevvFiErrors.AuctionEnded();
 
-        // REFUND PREVIOUS BIDDER - Critical fix
+        uint256 minBid =
+            auction.highestBid == 0 ? 1 : auction.highestBid + (auction.highestBid * minBidIncrementBps / 10000);
+        if (bidAmount < minBid) revert RevvFiErrors.BidTooLow();
+        if (bidAmount > auction.debtAmount) revert RevvFiErrors.BidTooLow();
+
+        // Get token reference once
+        IERC20 token = IERC20(auction.borrowAsset);
+
+        // REFUND PREVIOUS BIDDER
         if (auction.highestBidder != address(0) && auction.highestBid > 0) {
-            IERC20 token = IERC20(auction.borrowAsset);
             token.safeTransfer(auction.highestBidder, auction.highestBid);
         }
 
         // Transfer new bid amount
-        IERC20 token = IERC20(auction.borrowAsset);
         token.safeTransferFrom(msg.sender, address(this), bidAmount);
 
         auction.highestBid = bidAmount;
@@ -156,29 +119,27 @@ contract RevvFiLiquidator is ReentrancyGuard {
             auction.endTime = block.timestamp + auctionExtensionWindow;
         }
 
-        emit BidPlaced(auctionId, msg.sender, bidAmount, auction.collateralAmount);
+        emit RevvFiEvents.BidPlaced(auctionId, msg.sender, bidAmount, auction.collateralAmount);
     }
 
     function settleAuction(uint256 auctionId) external nonReentrant {
         Auction storage auction = auctions[auctionId];
-        if (!auction.active) revert AuctionNotFound();
-        if (block.timestamp <= auction.endTime) revert AuctionNotActive();
-        if (auction.settled) revert AuctionAlreadySettled();
+        if (!auction.active) revert RevvFiErrors.AuctionNotFound();
+        if (block.timestamp <= auction.endTime) revert RevvFiErrors.AuctionNotActive();
+        if (auction.settled) revert RevvFiErrors.AuctionAlreadySettled();
 
-        if (auction.highestBidder == address(0)) revert NoBids();
+        if (auction.highestBidder == address(0)) revert RevvFiErrors.NoBids();
 
-        // Transfer bid amount to market to reduce debt
         IERC20 borrowToken = IERC20(auction.borrowAsset);
         borrowToken.safeTransfer(auction.market, auction.highestBid);
 
-        // Transfer collateral to winner
         IERC20 collateralToken = IERC20(auction.collateralAsset);
         collateralToken.safeTransfer(auction.highestBidder, auction.collateralAmount);
 
         auction.active = false;
         auction.settled = true;
 
-        emit AuctionSettled(
+        emit RevvFiEvents.AuctionSettled(
             auctionId,
             auction.highestBidder,
             auction.collateralAsset,
@@ -190,7 +151,7 @@ contract RevvFiLiquidator is ReentrancyGuard {
 
     function cancelAuction(uint256 auctionId) external onlyFactory {
         Auction storage auction = auctions[auctionId];
-        if (!auction.active) revert AuctionNotFound();
+        if (!auction.active) revert RevvFiErrors.AuctionNotFound();
 
         if (auction.highestBidder != address(0) && auction.highestBid > 0) {
             IERC20 token = IERC20(auction.borrowAsset);
@@ -198,16 +159,18 @@ contract RevvFiLiquidator is ReentrancyGuard {
         }
 
         auction.active = false;
-        emit AuctionCancelled(auctionId);
+        emit RevvFiEvents.AuctionCancelled(auctionId);
     }
 
     function getAuction(uint256 auctionId) external view returns (Auction memory) {
         return auctions[auctionId];
     }
 
-    function getWinningBid(
-        uint256 auctionId
-    ) external view returns (address winner, uint256 bidAmount, uint256 collateralAmount) {
+    function getWinningBid(uint256 auctionId)
+        external
+        view
+        returns (address winner, uint256 bidAmount, uint256 collateralAmount)
+    {
         Auction storage auction = auctions[auctionId];
         return (auction.highestBidder, auction.highestBid, auction.collateralAmount);
     }

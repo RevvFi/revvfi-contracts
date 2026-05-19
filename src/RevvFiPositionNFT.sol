@@ -3,29 +3,10 @@ pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "./libraries/RevvFiErrors.sol";
+import "./libraries/RevvFiEvents.sol";
 
 contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
-    error ZeroAddress();
-    error UnauthorizedCaller();
-    error PositionNotFound();
-    error PositionAlreadyFinalized();
-    error MarketAlreadyRegistered();
-    error MarketNotRegistered();
-
-    event PositionMinted(
-        uint256 indexed tokenId,
-        address indexed lender,
-        address indexed market,
-        uint256 principal,
-        uint256 apr,
-        uint8 seniority
-    );
-    event PositionBurned(uint256 indexed tokenId);
-    event InterestClaimed(uint256 indexed tokenId, address indexed lender, uint256 amount);
-    event PositionRedeemed(uint256 indexed tokenId, uint256 principalAmount, uint256 interestAmount);
-    event MarketRegistered(address indexed market);
-    event MarketUnregistered(address indexed market);
-
     struct Position {
         uint256 tokenId;
         address market;
@@ -47,41 +28,39 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
     uint256 private _nextTokenId;
 
     modifier onlyFactory() {
-        if (msg.sender != factory) revert UnauthorizedCaller();
+        if (msg.sender != factory) revert RevvFiErrors.UnauthorizedCaller();
         _;
     }
 
     modifier onlyApprovedMarket() {
-        if (!approvedMarkets[msg.sender]) revert MarketNotRegistered();
+        if (!approvedMarkets[msg.sender]) revert RevvFiErrors.MarketNotRegistered();
         _;
     }
 
     constructor(address _factory) ERC721("RevvFi Position", "RVF-POS") Ownable(msg.sender) {
-        if (_factory == address(0)) revert ZeroAddress();
+        if (_factory == address(0)) revert RevvFiErrors.ZeroAddress();
         factory = _factory;
         _nextTokenId = 1;
     }
 
     function registerMarket(address market) external onlyFactory {
-        if (market == address(0)) revert ZeroAddress();
-        if (approvedMarkets[market]) revert MarketAlreadyRegistered();
+        if (market == address(0)) revert RevvFiErrors.ZeroAddress();
+        if (approvedMarkets[market]) revert RevvFiErrors.MarketAlreadyRegistered();
         approvedMarkets[market] = true;
-        emit MarketRegistered(market);
+        emit RevvFiEvents.MarketRegistered(market);
     }
 
     function unregisterMarket(address market) external onlyFactory {
-        if (!approvedMarkets[market]) revert MarketNotRegistered();
+        if (!approvedMarkets[market]) revert RevvFiErrors.MarketNotRegistered();
         approvedMarkets[market] = false;
-        emit MarketUnregistered(market);
+        emit RevvFiEvents.MarketUnregistered(market);
     }
 
-    function mintPosition(
-        address lender,
-        address market,
-        uint256 principal,
-        uint256 apr,
-        uint8 seniority
-    ) external onlyApprovedMarket returns (uint256 tokenId) {
+    function mintPosition(address lender, address market, uint256 principal, uint256 apr, uint8 seniority)
+        external
+        onlyApprovedMarket
+        returns (uint256 tokenId)
+    {
         tokenId = _nextTokenId;
         _nextTokenId++;
 
@@ -102,32 +81,29 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
         lenderPositionIndex[lender][tokenId] = lenderPositions[lender].length - 1;
         _safeMint(lender, tokenId);
 
-        emit PositionMinted(tokenId, lender, market, principal, apr, seniority);
+        emit RevvFiEvents.PositionMinted(tokenId, lender, market, principal, apr, seniority);
         return tokenId;
     }
 
-    // For OpenZeppelin v5, we override _update instead of _beforeTokenTransfer
     function _update(address to, uint256 tokenId, address auth) internal override returns (address) {
         address from = _ownerOf(tokenId);
-        
-        // Remove from old owner's tracking
+
         if (from != address(0)) {
             uint256[] storage fromPositions = lenderPositions[from];
             uint256 index = lenderPositionIndex[from][tokenId];
             uint256 lastId = fromPositions[fromPositions.length - 1];
-            
+
             fromPositions[index] = lastId;
             lenderPositionIndex[from][lastId] = index;
             fromPositions.pop();
             delete lenderPositionIndex[from][tokenId];
         }
-        
-        // Add to new owner's tracking
+
         if (to != address(0)) {
             lenderPositionIndex[to][tokenId] = lenderPositions[to].length;
             lenderPositions[to].push(tokenId);
         }
-        
+
         return super._update(to, tokenId, auth);
     }
 
@@ -137,29 +113,29 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
 
     function addAccruedInterest(uint256 tokenId, uint256 amount) external onlyApprovedMarket {
         Position storage pos = positions[tokenId];
-        if (!pos.active) revert PositionNotFound();
+        if (!pos.active) revert RevvFiErrors.PositionNotFound();
         pos.accruedInterest += amount;
         pos.lastAccrualTime = block.timestamp;
     }
 
     function updateLastAccrualTime(uint256 tokenId) external onlyApprovedMarket {
         Position storage pos = positions[tokenId];
-        if (!pos.active) revert PositionNotFound();
+        if (!pos.active) revert RevvFiErrors.PositionNotFound();
         pos.lastAccrualTime = block.timestamp;
     }
 
     function claimInterest(uint256 tokenId) external returns (uint256 amount) {
         address lender = ownerOf(tokenId);
-        if (lender != msg.sender) revert UnauthorizedCaller();
+        if (lender != msg.sender) revert RevvFiErrors.UnauthorizedCaller();
 
         Position storage pos = positions[tokenId];
-        if (!pos.active) revert PositionNotFound();
+        if (!pos.active) revert RevvFiErrors.PositionNotFound();
 
         amount = pos.accruedInterest;
-        if (amount == 0) revert PositionNotFound();
+        if (amount == 0) revert RevvFiErrors.PositionNotFound();
 
         pos.accruedInterest = 0;
-        emit InterestClaimed(tokenId, lender, amount);
+        emit RevvFiEvents.InterestClaimed(tokenId, lender, amount);
         return amount;
     }
 
@@ -169,18 +145,17 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
         return pos.accruedInterest;
     }
 
-    function redeemPosition(
-        uint256 tokenId,
-        uint256 principalAmount,
-        uint256 interestAmount
-    ) external onlyApprovedMarket {
+    function redeemPosition(uint256 tokenId, uint256 principalAmount, uint256 interestAmount)
+        external
+        onlyApprovedMarket
+    {
         Position storage pos = positions[tokenId];
-        if (!pos.active) revert PositionNotFound();
+        if (!pos.active) revert RevvFiErrors.PositionNotFound();
 
         pos.active = false;
         _burn(tokenId);
 
-        emit PositionRedeemed(tokenId, principalAmount, interestAmount);
+        emit RevvFiEvents.PositionRedeemed(tokenId, principalAmount, interestAmount);
     }
 
     function getPosition(uint256 tokenId) external view returns (Position memory) {
