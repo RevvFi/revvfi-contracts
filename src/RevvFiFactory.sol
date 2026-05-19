@@ -11,36 +11,25 @@ import "./RevvFiPositionNFT.sol";
 import "./RevvFiLiquidator.sol";
 import "./RevvFiMarket.sol";
 
-/**
- * @title RevvFiFactory
- * @notice Factory for deploying new RevvFi markets
- */
 contract RevvFiFactory is Ownable, ReentrancyGuard {
-    // ========================================================================== //
-    //                                   Errors                                    //
-    // ========================================================================== //
-
     error ZeroAddress();
     error BorrowerNotRegistered();
     error InsufficientFee();
     error DeploymentFailed();
-
-    // ========================================================================== //
-    //                                   Events                                    //
-    // ========================================================================== //
+    error UnauthorizedCaller();
+    error PendingArchControllerNotSet();
 
     event MarketDeployed(
         address indexed market,
         address indexed borrower,
         address borrowAsset,
         address collateralAsset,
+        address collateralOracle,
         uint256 timestamp
     );
     event FeeUpdated(uint256 oldFee, uint256 newFee);
-
-    // ========================================================================== //
-    //                                   State                                     //
-    // ========================================================================== //
+    event ArchControllerUpdateRequested(address indexed newArchController);
+    event ArchControllerUpdated(address indexed oldArchController, address indexed newArchController);
 
     RevvFiArchController public archController;
     RevvFiPositionNFT public positionNFT;
@@ -51,9 +40,9 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
 
     address[] public allMarkets;
 
-    // ========================================================================== //
-    //                                 Constructor                                //
-    // ========================================================================== //
+    address public pendingArchController;
+    uint256 public archControllerUpdateTimelock;
+    uint256 public constant TIMELOCK_DURATION = 2 days;
 
     constructor(
         address _archController,
@@ -67,43 +56,28 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         feeRecipient = _feeRecipient;
         deploymentFee = _deploymentFee;
 
-        // Deploy global contracts
         positionNFT = new RevvFiPositionNFT(address(this));
         liquidator = new RevvFiLiquidator(address(this));
+        
+        archController.registerControllerFactory(address(this));
     }
 
-    // ========================================================================== //
-    //                              Market Deployment                              //
-    // ========================================================================== //
-
-    /**
-     * @dev Deploy a new market
-     */
     function deployMarket(
         address borrower,
         address borrowAsset,
         address collateralAsset,
+        address collateralOracle,
+        uint8 collateralDecimals,
+        uint8 borrowDecimals,
         uint256 minCollateralRatio,
         uint256 liquidationThreshold
     ) external payable nonReentrant returns (address marketAddress) {
         if (msg.value != deploymentFee) revert InsufficientFee();
         if (!archController.isRegisteredBorrower(borrower)) revert BorrowerNotRegistered();
 
-        // Transfer fee
         (bool feeSent, ) = feeRecipient.call{value: deploymentFee}("");
         require(feeSent, "Fee transfer failed");
 
-        // Deploy collateral escrow
-        RevvFiCollateralEscrow collateralEscrow = new RevvFiCollateralEscrow(address(this));
-        collateralEscrow.initialize(address(this), borrowAsset, collateralAsset);
-        collateralEscrow.setMinCollateralRatio(minCollateralRatio);
-        collateralEscrow.setLiquidationThreshold(liquidationThreshold);
-
-        // Deploy offer book
-        RevvFiOfferBook offerBook = new RevvFiOfferBook(address(this));
-        offerBook.initialize(address(this), borrowAsset);
-
-        // Deploy market
         RevvFiMarket market = new RevvFiMarket(
             address(this),
             address(archController),
@@ -112,26 +86,42 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
             collateralAsset
         );
 
-        market.initialize(
+        marketAddress = address(market);
+
+        RevvFiCollateralEscrow collateralEscrow = new RevvFiCollateralEscrow(address(this));
+        collateralEscrow.initialize(
+            marketAddress,
+            borrowAsset,
+            collateralAsset,
+            collateralOracle,
+            collateralDecimals,
+            borrowDecimals
+        );
+        collateralEscrow.setMinCollateralRatio(minCollateralRatio);
+        collateralEscrow.setLiquidationThreshold(liquidationThreshold);
+
+        RevvFiOfferBook offerBook = new RevvFiOfferBook(address(this));
+        offerBook.initialize(marketAddress, borrowAsset);
+
+        market.setContracts(
             address(collateralEscrow),
             address(offerBook),
             address(positionNFT),
             address(liquidator)
         );
 
-        marketAddress = address(market);
-
-        // Register market with arch controller
         archController.registerMarket(marketAddress);
-
         allMarkets.push(marketAddress);
 
-        emit MarketDeployed(marketAddress, borrower, borrowAsset, collateralAsset, block.timestamp);
+        emit MarketDeployed(
+            marketAddress,
+            borrower,
+            borrowAsset,
+            collateralAsset,
+            collateralOracle,
+            block.timestamp
+        );
     }
-
-    // ========================================================================== //
-    //                               View Functions                                //
-    // ========================================================================== //
 
     function getAllMarkets() external view returns (address[] memory) {
         return allMarkets;
@@ -140,10 +130,6 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
     function getMarketsCount() external view returns (uint256) {
         return allMarkets.length;
     }
-
-    // ========================================================================== //
-    //                               Admin Functions                               //
-    // ========================================================================== //
 
     function setDeploymentFee(uint256 newFee) external onlyOwner {
         emit FeeUpdated(deploymentFee, newFee);
@@ -155,8 +141,28 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         feeRecipient = newRecipient;
     }
 
-    function setArchController(address newArchController) external onlyOwner {
+    function requestArchControllerUpdate(address newArchController) external onlyOwner {
         if (newArchController == address(0)) revert ZeroAddress();
-        archController = RevvFiArchController(newArchController);
+        pendingArchController = newArchController;
+        archControllerUpdateTimelock = block.timestamp + TIMELOCK_DURATION;
+        emit ArchControllerUpdateRequested(newArchController);
+    }
+
+    function executeArchControllerUpdate() external onlyOwner {
+        if (pendingArchController == address(0)) revert PendingArchControllerNotSet();
+        if (block.timestamp < archControllerUpdateTimelock) revert UnauthorizedCaller();
+        
+        address oldArchController = address(archController);
+        archController = RevvFiArchController(pendingArchController);
+        
+        pendingArchController = address(0);
+        archControllerUpdateTimelock = 0;
+        
+        emit ArchControllerUpdated(oldArchController, address(archController));
+    }
+
+    function cancelArchControllerUpdate() external onlyOwner {
+        pendingArchController = address(0);
+        archControllerUpdateTimelock = 0;
     }
 }

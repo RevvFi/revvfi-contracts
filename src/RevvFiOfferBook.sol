@@ -6,16 +6,8 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IRevvFiOfferBook.sol";
 
-/**
- * @title RevvFiOfferBook
- * @notice Manages lender offers with competitive APRs for borrowing
- */
 contract RevvFiOfferBook is ReentrancyGuard {
     using SafeERC20 for IERC20;
-
-    // ========================================================================== //
-    //                                   Errors                                    //
-    // ========================================================================== //
 
     error ZeroAddress();
     error ZeroAmount();
@@ -27,10 +19,9 @@ contract RevvFiOfferBook is ReentrancyGuard {
     error UnauthorizedCaller();
     error InvalidSeniority();
     error InsufficientLiquidity();
-
-    // ========================================================================== //
-    //                                   Events                                    //
-    // ========================================================================== //
+    error MaxOffersExceeded();
+    error NoActiveOffers();
+    error MaxIterationsExceeded();
 
     event OfferSubmitted(
         uint256 indexed offerId,
@@ -44,10 +35,6 @@ contract RevvFiOfferBook is ReentrancyGuard {
     event OfferFilled(uint256 indexed offerId, address indexed lender, uint256 amountFilled);
     event DrawdownExecuted(address indexed borrower, uint256 totalAmount, uint256 weightedApr);
 
-    // ========================================================================== //
-    //                                   Structs                                   //
-    // ========================================================================== //
-
     struct Offer {
         uint256 id;
         address lender;
@@ -60,9 +47,10 @@ contract RevvFiOfferBook is ReentrancyGuard {
         bool isSenior;
     }
 
-    // ========================================================================== //
-    //                                   State                                     //
-    // ========================================================================== //
+    uint256 public constant MAX_OFFERS_PER_LENDER = 20;
+    uint256 public constant MAX_ACTIVE_OFFERS_GLOBAL = 500;
+    uint256 public constant MIN_OFFER_AMOUNT = 100e6; // 100 USDC for 6 decimal tokens
+    uint256 public constant MAX_ITERATIONS = 100;
 
     address public immutable factory;
     address public market;
@@ -70,14 +58,17 @@ contract RevvFiOfferBook is ReentrancyGuard {
 
     mapping(uint256 => Offer) public offers;
     mapping(address => uint256[]) public lenderOfferIds;
+    mapping(uint256 => bool) public isActiveOffer;
+    
     uint256 public nextOfferId;
     uint256 public totalLiquidityAvailable;
+    uint256 public activeOfferCount;
+
+    // Circular buffer for active offers to avoid unbounded growth
+    uint256[] private _activeOfferIds;
+    mapping(uint256 => uint256) private _activeOfferIndex; // offerId -> index in _activeOfferIds
 
     bool public isInitialized;
-
-    // ========================================================================== //
-    //                                 Modifiers                                   //
-    // ========================================================================== //
 
     modifier onlyMarket() {
         if (msg.sender != market) revert UnauthorizedCaller();
@@ -89,20 +80,13 @@ contract RevvFiOfferBook is ReentrancyGuard {
         _;
     }
 
-    // ========================================================================== //
-    //                                 Constructor                                //
-    // ========================================================================== //
-
     constructor(address _factory) {
         if (_factory == address(0)) revert ZeroAddress();
         factory = _factory;
         nextOfferId = 1;
         isInitialized = false;
+        activeOfferCount = 0;
     }
-
-    // ========================================================================== //
-    //                               Initialization                               //
-    // ========================================================================== //
 
     function initialize(address _market, address _borrowAsset) external onlyFactory {
         if (isInitialized) revert UnauthorizedCaller();
@@ -114,9 +98,27 @@ contract RevvFiOfferBook is ReentrancyGuard {
         isInitialized = true;
     }
 
-    // ========================================================================== //
-    //                              Lender Functions                               //
-    // ========================================================================== //
+    function _addToActiveList(uint256 offerId) internal {
+        isActiveOffer[offerId] = true;
+        _activeOfferIndex[offerId] = _activeOfferIds.length;
+        _activeOfferIds.push(offerId);
+        activeOfferCount++;
+    }
+
+    function _removeFromActiveList(uint256 offerId) internal {
+        if (!isActiveOffer[offerId]) return;
+        
+        uint256 index = _activeOfferIndex[offerId];
+        uint256 lastId = _activeOfferIds[_activeOfferIds.length - 1];
+        
+        _activeOfferIds[index] = lastId;
+        _activeOfferIndex[lastId] = index;
+        _activeOfferIds.pop();
+        
+        delete _activeOfferIndex[offerId];
+        isActiveOffer[offerId] = false;
+        activeOfferCount--;
+    }
 
     function submitOffer(
         uint256 amount,
@@ -125,9 +127,12 @@ contract RevvFiOfferBook is ReentrancyGuard {
         uint256 duration
     ) external nonReentrant returns (uint256 offerId) {
         if (amount == 0) revert ZeroAmount();
+        if (amount < MIN_OFFER_AMOUNT) revert ZeroAmount();
         if (apr == 0) revert ZeroApr();
         if (seniority > 1) revert InvalidSeniority();
         if (duration == 0) revert ZeroAmount();
+        if (activeOfferCount >= MAX_ACTIVE_OFFERS_GLOBAL) revert MaxOffersExceeded();
+        if (lenderOfferIds[msg.sender].length >= MAX_OFFERS_PER_LENDER) revert MaxOffersExceeded();
 
         IERC20 token = IERC20(borrowAsset);
         token.safeTransferFrom(msg.sender, address(this), amount);
@@ -147,6 +152,7 @@ contract RevvFiOfferBook is ReentrancyGuard {
         });
 
         lenderOfferIds[msg.sender].push(offerId);
+        _addToActiveList(offerId);
         totalLiquidityAvailable += amount;
 
         emit OfferSubmitted(offerId, msg.sender, amount, apr, seniority, block.timestamp + duration);
@@ -156,9 +162,9 @@ contract RevvFiOfferBook is ReentrancyGuard {
         Offer storage offer = offers[offerId];
         if (offer.lender != msg.sender) revert UnauthorizedCaller();
         if (!offer.active) revert OfferNotActive();
-        if (offer.expiry < block.timestamp) revert OfferExpired();
 
         offer.active = false;
+        _removeFromActiveList(offerId);
         totalLiquidityAvailable -= offer.remainingAmount;
 
         if (offer.remainingAmount > 0) {
@@ -170,65 +176,65 @@ contract RevvFiOfferBook is ReentrancyGuard {
         emit OfferCancelled(offerId, msg.sender);
     }
 
-    // ========================================================================== //
-    //                           Borrowing Functions                               //
-    // ========================================================================== //
+    function _getActiveOffers() internal view returns (uint256[] memory) {
+        return _activeOfferIds;
+    }
 
     function getBestOffers(
         uint256 amount,
         bool useSeniorOnly
     ) public view returns (Offer[] memory bestOffers, uint256 totalAvailable, uint256 weightedApr) {
-        // First, collect all active offers
-        Offer[] memory tempOffers = new Offer[](nextOfferId);
-        uint256 activeCount = 0;
-
-        for (uint256 i = 1; i < nextOfferId; i++) {
-            Offer storage offer = offers[i];
-            if (offer.active && offer.remainingAmount > 0 && offer.expiry > block.timestamp) {
-                if (!useSeniorOnly || offer.isSenior) {
-                    tempOffers[activeCount] = offer;
-                    activeCount++;
-                }
-            }
-        }
-
-        if (activeCount == 0) {
+        uint256[] memory activeIds = _getActiveOffers();
+        
+        if (activeIds.length == 0) {
             bestOffers = new Offer[](0);
             totalAvailable = 0;
             weightedApr = 0;
             return (bestOffers, totalAvailable, weightedApr);
         }
 
-        // Copy to properly sized array
-        Offer[] memory activeOffers = new Offer[](activeCount);
-        for (uint256 i = 0; i < activeCount; i++) {
-            activeOffers[i] = tempOffers[i];
-        }
-
-        // Sort by APR (lowest first) - simple bubble sort
-        for (uint256 i = 0; i < activeCount - 1; i++) {
-            for (uint256 j = 0; j < activeCount - i - 1; j++) {
-                if (activeOffers[j].apr > activeOffers[j + 1].apr) {
-                    Offer memory temp = activeOffers[j];
-                    activeOffers[j] = activeOffers[j + 1];
-                    activeOffers[j + 1] = temp;
+        Offer[] memory tempOffers = new Offer[](activeIds.length);
+        uint256 validCount = 0;
+        
+        uint256 iterations = 0;
+        for (uint256 i = 0; i < activeIds.length && iterations < MAX_ITERATIONS; i++) {
+            iterations++;
+            Offer storage offer = offers[activeIds[i]];
+            if (offer.active && offer.remainingAmount > 0 && offer.expiry > block.timestamp) {
+                if (!useSeniorOnly || offer.isSenior) {
+                    tempOffers[validCount] = offer;
+                    validCount++;
                 }
             }
         }
 
-        // Select best offers until amount is filled
+        if (validCount == 0) revert NoActiveOffers();
+
+        // Simple selection sort (bounded by MAX_ACTIVE_OFFERS_GLOBAL=500)
+        for (uint256 i = 0; i < validCount; i++) {
+            uint256 minIdx = i;
+            for (uint256 j = i + 1; j < validCount; j++) {
+                if (tempOffers[j].apr < tempOffers[minIdx].apr) {
+                    minIdx = j;
+                }
+            }
+            if (minIdx != i) {
+                Offer memory temp = tempOffers[i];
+                tempOffers[i] = tempOffers[minIdx];
+                tempOffers[minIdx] = temp;
+            }
+        }
+
         uint256 remaining = amount;
         uint256 totalAprWeight = 0;
         totalAvailable = 0;
         uint256 selectedCount = 0;
 
-        for (uint256 i = 0; i < activeCount && remaining > 0; i++) {
-            uint256 take = activeOffers[i].remainingAmount < remaining
-                ? activeOffers[i].remainingAmount
-                : remaining;
+        for (uint256 i = 0; i < validCount && remaining > 0; i++) {
+            uint256 take = tempOffers[i].remainingAmount < remaining ? tempOffers[i].remainingAmount : remaining;
             remaining -= take;
             totalAvailable += take;
-            totalAprWeight += take * activeOffers[i].apr;
+            totalAprWeight += take * tempOffers[i].apr;
             selectedCount++;
         }
 
@@ -241,18 +247,15 @@ contract RevvFiOfferBook is ReentrancyGuard {
 
         weightedApr = totalAprWeight / amount;
 
-        // Build result array
         bestOffers = new Offer[](selectedCount);
         uint256 idx = 0;
         remaining = amount;
 
-        for (uint256 i = 0; i < activeCount && remaining > 0; i++) {
-            uint256 take = activeOffers[i].remainingAmount < remaining
-                ? activeOffers[i].remainingAmount
-                : remaining;
+        for (uint256 i = 0; i < validCount && remaining > 0; i++) {
+            uint256 take = tempOffers[i].remainingAmount < remaining ? tempOffers[i].remainingAmount : remaining;
             remaining -= take;
 
-            bestOffers[idx] = activeOffers[i];
+            bestOffers[idx] = tempOffers[i];
             bestOffers[idx].remainingAmount = take;
             idx++;
         }
@@ -264,16 +267,12 @@ contract RevvFiOfferBook is ReentrancyGuard {
         uint256 amount,
         bool useSeniorOnly
     ) external onlyMarket nonReentrant returns (IRevvFiOfferBook.Offer[] memory filledOffers, uint256 weightedApr) {
-        (Offer[] memory offersToFill, uint256 totalAvailable, uint256 computedApr) = getBestOffers(
-            amount,
-            useSeniorOnly
-        );
+        (Offer[] memory offersToFill, uint256 totalAvailable, uint256 computedApr) = getBestOffers(amount, useSeniorOnly);
 
         if (totalAvailable < amount) revert InsufficientOfferAmount();
 
         weightedApr = computedApr;
         
-        // Convert to interface type
         IRevvFiOfferBook.Offer[] memory result = new IRevvFiOfferBook.Offer[](offersToFill.length);
 
         for (uint256 i = 0; i < offersToFill.length; i++) {
@@ -300,6 +299,7 @@ contract RevvFiOfferBook is ReentrancyGuard {
 
             if (offer.remainingAmount == 0) {
                 offer.active = false;
+                _removeFromActiveList(offer.id);
             }
 
             emit OfferFilled(offer.id, offer.lender, amountToTake);
@@ -310,18 +310,15 @@ contract RevvFiOfferBook is ReentrancyGuard {
         return (result, weightedApr);
     }
 
-    // ========================================================================== //
-    //                               View Functions                                //
-    // ========================================================================== //
-
     function getOffer(uint256 offerId) external view returns (Offer memory) {
         return offers[offerId];
     }
 
     function getLenderOffers(address lender) external view returns (Offer[] memory) {
         uint256[] storage ids = lenderOfferIds[lender];
-        Offer[] memory lenderOffers = new Offer[](ids.length);
-        for (uint256 i = 0; i < ids.length; i++) {
+        uint256 maxReturn = ids.length > 50 ? 50 : ids.length;
+        Offer[] memory lenderOffers = new Offer[](maxReturn);
+        for (uint256 i = 0; i < maxReturn; i++) {
             lenderOffers[i] = offers[ids[i]];
         }
         return lenderOffers;
@@ -329,5 +326,9 @@ contract RevvFiOfferBook is ReentrancyGuard {
 
     function getTotalLiquidityAvailable() external view returns (uint256) {
         return totalLiquidityAvailable;
+    }
+
+    function getActiveOfferCount() external view returns (uint256) {
+        return activeOfferCount;
     }
 }

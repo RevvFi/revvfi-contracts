@@ -4,27 +4,14 @@ pragma solidity 0.8.33;
 import { EnumerableSet } from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
-/**
- * @title RevvFiArchController
- * @notice Central registry for all RevvFi protocol components
- * @dev Manages borrowers, markets, controller factories, and asset blacklist
- */
 contract RevvFiArchController is Ownable {
     using EnumerableSet for EnumerableSet.AddressSet;
-
-    // ========================================================================== //
-    //                                   Storage                                  //
-    // ========================================================================== //
 
     EnumerableSet.AddressSet internal _markets;
     EnumerableSet.AddressSet internal _controllerFactories;
     EnumerableSet.AddressSet internal _borrowers;
     EnumerableSet.AddressSet internal _controllers;
     EnumerableSet.AddressSet internal _assetBlacklist;
-
-    // ========================================================================== //
-    //                              Events and Errors                             //
-    // ========================================================================== //
 
     error NotControllerFactory();
     error NotController();
@@ -38,6 +25,7 @@ contract RevvFiArchController is Ownable {
     error ControllerDoesNotExist();
     error AssetNotBlacklisted();
     error MarketDoesNotExist();
+    error ZeroAddressNotAllowed();
 
     event MarketAdded(address indexed controller, address market);
     event MarketRemoved(address market);
@@ -50,17 +38,10 @@ contract RevvFiArchController is Ownable {
     event ControllerAdded(address indexed controllerFactory, address controller);
     event ControllerRemoved(address controller);
 
-    // ========================================================================== //
-    //                                 Constructor                                //
-    // ========================================================================== //
-
     constructor() Ownable(msg.sender) {}
 
-    // ========================================================================== //
-    //                                  Borrowers                                 //
-    // ========================================================================== //
-
     function registerBorrower(address borrower) external onlyOwner {
+        if (borrower == address(0)) revert ZeroAddressNotAllowed();
         if (!_borrowers.add(borrower)) revert BorrowerAlreadyExists();
         emit BorrowerAdded(borrower);
     }
@@ -83,6 +64,9 @@ contract RevvFiArchController is Ownable {
         uint256 end
     ) external view returns (address[] memory arr) {
         uint256 len = _borrowers.length();
+        if (start >= end || start >= len) {
+            return new address[](0);
+        }
         end = end > len ? len : end;
         uint256 count = end - start;
         arr = new address[](count);
@@ -100,6 +84,7 @@ contract RevvFiArchController is Ownable {
     // ========================================================================== //
 
     function addBlacklist(address asset) external onlyOwner {
+        if (asset == address(0)) revert ZeroAddressNotAllowed();
         if (!_assetBlacklist.add(asset)) revert AssetAlreadyBlacklisted();
         emit AssetBlacklisted(asset);
     }
@@ -122,6 +107,9 @@ contract RevvFiArchController is Ownable {
         uint256 end
     ) external view returns (address[] memory arr) {
         uint256 len = _assetBlacklist.length();
+        if (start >= end || start >= len) {
+            return new address[](0);
+        }
         end = end > len ? len : end;
         uint256 count = end - start;
         arr = new address[](count);
@@ -139,6 +127,7 @@ contract RevvFiArchController is Ownable {
     // ========================================================================== //
 
     function registerControllerFactory(address factory) external onlyOwner {
+        if (factory == address(0)) revert ZeroAddressNotAllowed();
         if (!_controllerFactories.add(factory)) revert ControllerFactoryAlreadyExists();
         emit ControllerFactoryAdded(factory);
     }
@@ -161,6 +150,9 @@ contract RevvFiArchController is Ownable {
         uint256 end
     ) external view returns (address[] memory arr) {
         uint256 len = _controllerFactories.length();
+        if (start >= end || start >= len) {
+            return new address[](0);
+        }
         end = end > len ? len : end;
         uint256 count = end - start;
         arr = new address[](count);
@@ -183,6 +175,7 @@ contract RevvFiArchController is Ownable {
     }
 
     function registerController(address controller) external onlyControllerFactory {
+        if (controller == address(0)) revert ZeroAddressNotAllowed();
         if (!_controllers.add(controller)) revert ControllerAlreadyExists();
         emit ControllerAdded(msg.sender, controller);
     }
@@ -205,6 +198,9 @@ contract RevvFiArchController is Ownable {
         uint256 end
     ) external view returns (address[] memory arr) {
         uint256 len = _controllers.length();
+        if (start >= end || start >= len) {
+            return new address[](0);
+        }
         end = end > len ? len : end;
         uint256 count = end - start;
         arr = new address[](count);
@@ -227,6 +223,7 @@ contract RevvFiArchController is Ownable {
     }
 
     function registerMarket(address market) external onlyController {
+        if (market == address(0)) revert ZeroAddressNotAllowed();
         if (!_markets.add(market)) revert MarketAlreadyExists();
         emit MarketAdded(msg.sender, market);
     }
@@ -249,6 +246,9 @@ contract RevvFiArchController is Ownable {
         uint256 end
     ) external view returns (address[] memory arr) {
         uint256 len = _markets.length();
+        if (start >= end || start >= len) {
+            return new address[](0);
+        }
         end = end > len ? len : end;
         uint256 count = end - start;
         arr = new address[](count);

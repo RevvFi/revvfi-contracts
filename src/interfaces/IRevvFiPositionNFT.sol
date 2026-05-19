@@ -25,4 +25,11 @@ interface IRevvFiPositionNFT {
     function getPosition(uint256 tokenId) external view returns (Position memory);
     function getLenderPositions(address lender) external view returns (uint256[] memory);
     function ownerOf(uint256 tokenId) external view returns (address);
+    
+    // Additional functions needed by RevvFiMarket
+    function registerMarket(address market) external;
+    function addAccruedInterest(uint256 tokenId, uint256 amount) external;
+    function updateLastAccrualTime(uint256 tokenId) external;
+    function getAccruedInterest(uint256 tokenId) external view returns (uint256);
+    function isPositionActive(uint256 tokenId) external view returns (bool);
 }

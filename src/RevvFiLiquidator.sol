@@ -5,16 +5,8 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/**
- * @title RevvFiLiquidator
- * @notice Handles auction-based liquidation of undercollateralized positions
- */
 contract RevvFiLiquidator is ReentrancyGuard {
     using SafeERC20 for IERC20;
-
-    // ========================================================================== //
-    //                                   Errors                                    //
-    // ========================================================================== //
 
     error ZeroAddress();
     error ZeroAmount();
@@ -23,16 +15,17 @@ contract RevvFiLiquidator is ReentrancyGuard {
     error AuctionEnded();
     error BidTooLow();
     error UnauthorizedCaller();
-    error AlreadyLiquidating();
-
-    // ========================================================================== //
-    //                                   Events                                    //
-    // ========================================================================== //
+    error AuctionAlreadySettled();
+    error NoBids();
+    error LiquidationNotActive();
+    error TransferFailed();
 
     event AuctionCreated(
         uint256 indexed auctionId,
         address indexed market,
         address indexed borrower,
+        address borrowAsset,
+        address collateralAsset,
         uint256 collateralAmount,
         uint256 debtAmount,
         uint256 startTime,
@@ -47,19 +40,19 @@ contract RevvFiLiquidator is ReentrancyGuard {
     event AuctionSettled(
         uint256 indexed auctionId,
         address indexed winner,
+        address collateralAsset,
+        uint256 collateralAmount,
         uint256 bidAmount,
-        uint256 collateralAmount
+        uint256 debtRepaid
     );
     event AuctionCancelled(uint256 indexed auctionId);
-
-    // ========================================================================== //
-    //                                   Structs                                   //
-    // ========================================================================== //
 
     struct Auction {
         uint256 id;
         address market;
         address borrower;
+        address borrowAsset;
+        address collateralAsset;
         uint256 collateralAmount;
         uint256 debtAmount;
         uint256 startTime;
@@ -68,29 +61,20 @@ contract RevvFiLiquidator is ReentrancyGuard {
         address highestBidder;
         bool active;
         bool settled;
+        bool collateralTransferred;
     }
-
-    // ========================================================================== //
-    //                                   State                                     //
-    // ========================================================================== //
 
     address public immutable factory;
     mapping(uint256 => Auction) public auctions;
     uint256 public nextAuctionId;
-    uint256 public auctionDuration = 3 days; // Default auction duration
-
-    // ========================================================================== //
-    //                                 Modifiers                                   //
-    // ========================================================================== //
+    uint256 public auctionDuration = 3 days;
+    uint256 public minBidIncrementBps = 100;
+    uint256 public auctionExtensionWindow = 15 minutes;
 
     modifier onlyFactory() {
         if (msg.sender != factory) revert UnauthorizedCaller();
         _;
     }
-
-    // ========================================================================== //
-    //                                 Constructor                                //
-    // ========================================================================== //
 
     constructor(address _factory) {
         if (_factory == address(0)) revert ZeroAddress();
@@ -98,16 +82,11 @@ contract RevvFiLiquidator is ReentrancyGuard {
         nextAuctionId = 1;
     }
 
-    // ========================================================================== //
-    //                             Auction Management                              //
-    // ========================================================================== //
-
-    /**
-     * @dev Create a new liquidation auction (called by market)
-     */
     function createAuction(
         address market,
         address borrower,
+        address borrowAsset,
+        address collateralAsset,
         uint256 collateralAmount,
         uint256 debtAmount
     ) external onlyFactory returns (uint256 auctionId) {
@@ -117,6 +96,8 @@ contract RevvFiLiquidator is ReentrancyGuard {
             id: auctionId,
             market: market,
             borrower: borrower,
+            borrowAsset: borrowAsset,
+            collateralAsset: collateralAsset,
             collateralAmount: collateralAmount,
             debtAmount: debtAmount,
             startTime: block.timestamp,
@@ -124,13 +105,16 @@ contract RevvFiLiquidator is ReentrancyGuard {
             highestBid: 0,
             highestBidder: address(0),
             active: true,
-            settled: false
+            settled: false,
+            collateralTransferred: false
         });
 
         emit AuctionCreated(
             auctionId,
             market,
             borrower,
+            borrowAsset,
+            collateralAsset,
             collateralAmount,
             debtAmount,
             block.timestamp,
@@ -138,59 +122,78 @@ contract RevvFiLiquidator is ReentrancyGuard {
         );
     }
 
-    /**
-     * @dev Place a bid on an auction
-     * @param auctionId Auction ID
-     * @param bidAmount Amount of debt to cover (in borrowAsset)
-     */
+    function receiveCollateral(uint256 auctionId) external onlyFactory {
+        Auction storage auction = auctions[auctionId];
+        if (!auction.active) revert AuctionNotFound();
+        auction.collateralTransferred = true;
+    }
+
     function placeBid(uint256 auctionId, uint256 bidAmount) external nonReentrant {
         Auction storage auction = auctions[auctionId];
         if (!auction.active) revert AuctionNotFound();
         if (block.timestamp > auction.endTime) revert AuctionEnded();
-        if (bidAmount <= auction.highestBid) revert BidTooLow();
+        
+        uint256 minBid = auction.highestBid == 0 
+            ? 1 
+            : auction.highestBid + (auction.highestBid * minBidIncrementBps / 10000);
+        if (bidAmount < minBid) revert BidTooLow();
         if (bidAmount > auction.debtAmount) revert BidTooLow();
 
-        // Refund previous highest bidder
-        if (auction.highestBidder != address(0)) {
-            IERC20 token = IERC20(auction.market); // borrowAsset from market
+        // REFUND PREVIOUS BIDDER - Critical fix
+        if (auction.highestBidder != address(0) && auction.highestBid > 0) {
+            IERC20 token = IERC20(auction.borrowAsset);
             token.safeTransfer(auction.highestBidder, auction.highestBid);
         }
 
-        // Transfer bid amount from bidder
-        IERC20 token = IERC20(auction.market);
+        // Transfer new bid amount
+        IERC20 token = IERC20(auction.borrowAsset);
         token.safeTransferFrom(msg.sender, address(this), bidAmount);
 
         auction.highestBid = bidAmount;
         auction.highestBidder = msg.sender;
 
+        if (auction.endTime - block.timestamp < auctionExtensionWindow) {
+            auction.endTime = block.timestamp + auctionExtensionWindow;
+        }
+
         emit BidPlaced(auctionId, msg.sender, bidAmount, auction.collateralAmount);
     }
 
-    /**
-     * @dev Settle an auction after it ends (anyone can call)
-     */
     function settleAuction(uint256 auctionId) external nonReentrant {
         Auction storage auction = auctions[auctionId];
         if (!auction.active) revert AuctionNotFound();
         if (block.timestamp <= auction.endTime) revert AuctionNotActive();
-        if (auction.settled) revert AuctionEnded();
+        if (auction.settled) revert AuctionAlreadySettled();
+
+        if (auction.highestBidder == address(0)) revert NoBids();
+
+        // Transfer bid amount to market to reduce debt
+        IERC20 borrowToken = IERC20(auction.borrowAsset);
+        borrowToken.safeTransfer(auction.market, auction.highestBid);
+
+        // Transfer collateral to winner
+        IERC20 collateralToken = IERC20(auction.collateralAsset);
+        collateralToken.safeTransfer(auction.highestBidder, auction.collateralAmount);
 
         auction.active = false;
         auction.settled = true;
 
-        emit AuctionSettled(auctionId, auction.highestBidder, auction.highestBid, auction.collateralAmount);
+        emit AuctionSettled(
+            auctionId,
+            auction.highestBidder,
+            auction.collateralAsset,
+            auction.collateralAmount,
+            auction.highestBid,
+            auction.highestBid
+        );
     }
 
-    /**
-     * @dev Cancel an auction (if liquidation was resolved)
-     */
     function cancelAuction(uint256 auctionId) external onlyFactory {
         Auction storage auction = auctions[auctionId];
         if (!auction.active) revert AuctionNotFound();
 
-        // Return bid amount to highest bidder if any
         if (auction.highestBidder != address(0) && auction.highestBid > 0) {
-            IERC20 token = IERC20(auction.market);
+            IERC20 token = IERC20(auction.borrowAsset);
             token.safeTransfer(auction.highestBidder, auction.highestBid);
         }
 
@@ -198,25 +201,26 @@ contract RevvFiLiquidator is ReentrancyGuard {
         emit AuctionCancelled(auctionId);
     }
 
-    /**
-     * @dev Get auction details
-     */
     function getAuction(uint256 auctionId) external view returns (Auction memory) {
         return auctions[auctionId];
     }
 
-    /**
-     * @dev Get winning bid details for settlement
-     */
-    function getWinningBid(uint256 auctionId) external view returns (address winner, uint256 bidAmount, uint256 collateralAmount) {
+    function getWinningBid(
+        uint256 auctionId
+    ) external view returns (address winner, uint256 bidAmount, uint256 collateralAmount) {
         Auction storage auction = auctions[auctionId];
         return (auction.highestBidder, auction.highestBid, auction.collateralAmount);
     }
 
-    /**
-     * @dev Set auction duration (admin only via factory)
-     */
     function setAuctionDuration(uint256 newDuration) external onlyFactory {
         auctionDuration = newDuration;
+    }
+
+    function setMinBidIncrementBps(uint256 newIncrementBps) external onlyFactory {
+        minBidIncrementBps = newIncrementBps;
+    }
+
+    function setAuctionExtensionWindow(uint256 newWindow) external onlyFactory {
+        auctionExtensionWindow = newWindow;
     }
 }
