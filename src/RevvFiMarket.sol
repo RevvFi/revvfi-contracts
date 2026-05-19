@@ -547,7 +547,7 @@ contract RevvFiMarket is ReentrancyGuard {
         emit RevvFiEvents.LiquidationEndedMarket(borrower);
     }
 
-    function settleLiquidation(uint256 auctionId, uint256 debtRepaid) external {
+    function settleLiquidation(uint256 debtRepaid) external {
         if (msg.sender != address(liquidator)) revert RevvFiErrors.UnauthorizedCaller();
         if (!isLiquidating) revert RevvFiErrors.NotLiquidatingMarket();
 
