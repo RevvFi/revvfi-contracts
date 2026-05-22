@@ -12,14 +12,21 @@ import "./libraries/RevvFiEvents.sol";
 contract RevvFiCollateralEscrow is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    enum HealthStatus {
+        HEALTHY,
+        WARNING,
+        LIQUIDATABLE
+    }
+
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant DEFAULT_MIN_COLLATERAL_RATIO = 10000;
     uint256 public constant DEFAULT_LIQUIDATION_THRESHOLD = 9500;
+    uint256 public constant WARNING_THRESHOLD = 10500; // 105% - Ratio must be above this to be healthy
     uint256 public constant STALE_PRICE_THRESHOLD = 2 hours;
 
     address public immutable factory;
     address public market;
-    address public borrower;  // ADDED: store borrower address
+    address public borrower; // ADDED: store borrower address
     address public borrowAsset;
     address public collateralAsset;
 
@@ -87,7 +94,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         collateralDecimals = _collateralDecimals;
         borrowDecimals = _borrowDecimals;
 
-        collateralOracleDecimals = AggregatorV3Interface(_collateralOracle).decimals();
+        collateralOracleDecimals = IAggregatorV3Interface(_collateralOracle).decimals();
 
         isInitialized = true;
     }
@@ -155,14 +162,18 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         return (collateralValue * BASIS_POINTS) / debt;
     }
 
-    function _getCollateralValue(address borrowerAddr) internal view returns (uint256 valueInBorrowAsset, uint256 amount) {
+    function _getCollateralValue(address borrowerAddr)
+        internal
+        view
+        returns (uint256 valueInBorrowAsset, uint256 amount)
+    {
         amount = collateralBalance[borrowerAddr];
         valueInBorrowAsset = _getCollateralValueFromAmount(amount);
     }
 
     function _getLatestPrice() internal view returns (uint256) {
         (uint80 roundId, int256 price,, uint256 updatedAt, uint80 answeredInRound) =
-            AggregatorV3Interface(collateralOracle).latestRoundData();
+            IAggregatorV3Interface(collateralOracle).latestRoundData();
 
         if (price <= 0) revert RevvFiErrors.OracleNotSet();
         if (updatedAt < block.timestamp - STALE_PRICE_THRESHOLD) revert RevvFiErrors.OraclePriceStale();
@@ -183,6 +194,23 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         uint256 collateralValue = _getCollateralValueFromAmount(collateralBalance[borrowerAddr]);
         uint256 ratio = (collateralValue * BASIS_POINTS) / debt;
         return ratio < liquidationThreshold;
+    }
+
+    /**
+     * @dev Get detailed health status with three states: HEALTHY, WARNING, LIQUIDATABLE
+     * HEALTHY: ratio >= minCollateralRatio
+     * WARNING: liquidationThreshold <= ratio < minCollateralRatio (allows recovery window)
+     * LIQUIDATABLE: ratio < liquidationThreshold
+     */
+    function getHealthStatus(address borrowerAddr, uint256 debt) external view returns (HealthStatus) {
+        if (debt == 0) return HealthStatus.HEALTHY;
+
+        uint256 collateralValue = _getCollateralValueFromAmount(collateralBalance[borrowerAddr]);
+        uint256 ratio = (collateralValue * BASIS_POINTS) / debt;
+
+        if (ratio >= minCollateralRatio) return HealthStatus.HEALTHY;
+        if (ratio >= liquidationThreshold) return HealthStatus.WARNING;
+        return HealthStatus.LIQUIDATABLE;
     }
 
     function getMaxBorrowable(address borrowerAddr) external view returns (uint256) {
@@ -250,7 +278,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
     function setCollateralOracle(address newOracle) external onlyFactory {
         if (newOracle == address(0)) revert RevvFiErrors.ZeroAddress();
         collateralOracle = newOracle;
-        collateralOracleDecimals = AggregatorV3Interface(newOracle).decimals();
+        collateralOracleDecimals = IAggregatorV3Interface(newOracle).decimals();
         emit RevvFiEvents.OracleUpdated(collateralAsset, newOracle, collateralOracleDecimals);
     }
 }

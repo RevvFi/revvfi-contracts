@@ -27,6 +27,7 @@ contract RevvFiOfferBook is ReentrancyGuard {
     uint256 public constant MAX_ACTIVE_OFFERS_GLOBAL = 500;
     uint256 public constant MIN_OFFER_AMOUNT = 100e6;
     uint256 public constant MAX_ITERATIONS = 100;
+    uint256 public constant EXPIRY_CLEANUP_BATCH_SIZE = 50;
 
     address public immutable factory;
     address public market;
@@ -148,6 +149,78 @@ contract RevvFiOfferBook is ReentrancyGuard {
         }
 
         emit RevvFiEvents.OfferCancelled(offerId, msg.sender);
+    }
+
+    /**
+     * @dev Modify an existing offer's amount, APR, or duration
+     * FIXED: Preserves filled amount correctly
+     */
+    // Add this modifier to modifyOffer function
+    function modifyOffer(uint256 offerId, uint256 newAmount, uint256 newApr, uint256 newDuration)
+        external
+        nonReentrant
+    {
+        Offer storage offer = offers[offerId];
+        if (offer.lender != msg.sender) revert RevvFiErrors.UnauthorizedCaller();
+        if (!offer.active) revert RevvFiErrors.OfferNotActive();
+        if (newAmount == 0 || newAmount < MIN_OFFER_AMOUNT) revert RevvFiErrors.ZeroAmount();
+        if (newApr == 0) revert RevvFiErrors.ZeroApr();
+        if (newDuration == 0) revert RevvFiErrors.ZeroAmount();
+
+        // Calculate filled amount (amount that has been borrowed)
+        uint256 filledAmount = offer.amount - offer.remainingAmount;
+
+        // FIXED: Check that newAmount is not less than filledAmount
+        if (newAmount < filledAmount) revert RevvFiErrors.InsufficientOfferAmount();
+
+        uint256 newRemaining = newAmount - filledAmount;
+        IERC20 token = IERC20(borrowAsset);
+
+        if (newRemaining > offer.remainingAmount) {
+            uint256 delta = newRemaining - offer.remainingAmount;
+            token.safeTransferFrom(msg.sender, address(this), delta);
+            totalLiquidityAvailable += delta;
+        } else if (newRemaining < offer.remainingAmount) {
+            uint256 delta = offer.remainingAmount - newRemaining;
+            token.safeTransfer(msg.sender, delta);
+            totalLiquidityAvailable -= delta;
+        }
+
+        offer.amount = newAmount;
+        offer.remainingAmount = newRemaining;
+        offer.apr = newApr;
+        offer.expiry = block.timestamp + newDuration;
+
+        emit RevvFiEvents.OfferModified(offerId, newAmount, newApr, newDuration);
+    }
+
+    /**
+     * @dev Clean up expired offers to prevent activeOfferCount saturation
+     */
+    function cleanupExpiredOffers(uint256 maxCleanup) external nonReentrant {
+        uint256 cleaned = 0;
+        uint256 i = 0;
+
+        while (i < _activeOfferIds.length && cleaned < maxCleanup) {
+            uint256 offerId = _activeOfferIds[i];
+            Offer storage offer = offers[offerId];
+
+            if (offer.expiry <= block.timestamp) {
+                // FIXED: Refund remaining amount to lender
+                if (offer.remainingAmount > 0) {
+                    IERC20 token = IERC20(borrowAsset);
+                    token.safeTransfer(offer.lender, offer.remainingAmount);
+                    totalLiquidityAvailable -= offer.remainingAmount;
+                    offer.remainingAmount = 0;
+                }
+
+                offer.active = false;
+                _removeFromActiveList(offerId);
+                cleaned++;
+            } else {
+                i++;
+            }
+        }
     }
 
     function _getActiveOffers() internal view returns (uint256[] memory) {

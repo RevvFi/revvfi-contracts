@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.33;
 
-/**
- * @title RevvFiEvents
- * @notice Centralized event definitions for all RevvFi contracts
- * @dev All protocol contracts should import and use these events
- */
 library RevvFiEvents {
     // ========================================================================== //
     //                           ArchController Events                            //
@@ -51,6 +46,7 @@ library RevvFiEvents {
     event LiquidationStartedMarket(address indexed borrower);
     event LiquidationEndedMarket(address indexed borrower);
     event PositionSettled(uint256 indexed positionId, uint256 principalAmount, uint256 interestAmount);
+    event GuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
 
     // ========================================================================== //
     //                              OfferBook Events                              //
@@ -62,6 +58,7 @@ library RevvFiEvents {
     event OfferCancelled(uint256 indexed offerId, address indexed lender);
     event OfferFilled(uint256 indexed offerId, address indexed lender, uint256 amountFilled);
     event DrawdownExecutedOffer(address indexed borrower, uint256 totalAmount, uint256 weightedApr);
+    event OfferModified(uint256 indexed offerId, uint256 newAmount, uint256 newApr, uint256 newDuration);
 
     // ========================================================================== //
     //                           PositionNFT Events                               //
@@ -122,4 +119,14 @@ library RevvFiEvents {
     event FeeUpdated(uint256 oldFee, uint256 newFee);
     event ArchControllerUpdateRequested(address indexed newArchController);
     event ArchControllerUpdated(address indexed oldArchController, address indexed newArchController);
+
+    // ========================================================================== //
+    //                           Reputation Events                                //
+    // ========================================================================== //
+
+    event BorrowerRegistered(address indexed borrower);
+    event BorrowActivityRecorded(address indexed borrower, uint256 amount);
+    event SuccessfulRepaymentRecorded(address indexed borrower, uint256 amount);
+    event DefaultRecorded(address indexed borrower, uint256 originalDebt, uint256 recoveredAmount);
+    event ReputationScoreUpdated(address indexed borrower, uint256 oldScore, uint256 newScore);
 }

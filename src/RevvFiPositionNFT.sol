@@ -3,10 +3,13 @@ pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 import "./libraries/RevvFiErrors.sol";
 import "./libraries/RevvFiEvents.sol";
 
 contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
+    using Strings for uint256;
+
     struct Position {
         uint256 tokenId;
         address market;
@@ -25,20 +28,28 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
     mapping(address => bool) public approvedMarkets;
     uint256 private _nextTokenId;
 
+    string private _baseTokenURI;
+    string public constant TOKEN_NAME = "RevvFi Position";
+    string public constant TOKEN_SYMBOL = "RVF-POS";
+
     modifier onlyFactory() {
         if (msg.sender != factory) revert RevvFiErrors.UnauthorizedCaller();
         _;
     }
 
+    // FIXED: Allow both factory AND approved markets to call certain functions
     modifier onlyApprovedMarket() {
-        if (!approvedMarkets[msg.sender]) revert RevvFiErrors.MarketNotRegistered();
+        if (!approvedMarkets[msg.sender] && msg.sender != factory) {
+            revert RevvFiErrors.MarketNotRegistered();
+        }
         _;
     }
 
-    constructor(address _factory) ERC721("RevvFi Position", "RVF-POS") Ownable(msg.sender) {
+    constructor(address _factory) ERC721(TOKEN_NAME, TOKEN_SYMBOL) Ownable(msg.sender) {
         if (_factory == address(0)) revert RevvFiErrors.ZeroAddress();
         factory = _factory;
         _nextTokenId = 1;
+        _baseTokenURI = "";
     }
 
     function registerMarket(address market) external onlyFactory {
@@ -54,13 +65,11 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
         emit RevvFiEvents.MarketUnregistered(market);
     }
 
-    function mintPosition(
-        address lender,
-        address market,
-        uint256 principal,
-        uint256 apr,
-        uint8 seniority
-    ) external onlyApprovedMarket returns (uint256 tokenId) {
+    function mintPosition(address lender, address market, uint256 principal, uint256 apr, uint8 seniority)
+        external
+        onlyApprovedMarket
+        returns (uint256 tokenId)
+    {
         tokenId = _nextTokenId;
         _nextTokenId++;
 
@@ -138,5 +147,47 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
 
     function isPositionActive(uint256 tokenId) external view returns (bool) {
         return positions[tokenId].active;
+    }
+
+    function setBaseURI(string memory baseURI) external onlyFactory {
+        _baseTokenURI = baseURI;
+    }
+
+    function _tokenExists(uint256 tokenId) internal view returns (bool) {
+        return tokenId < _nextTokenId && tokenId != 0;
+    }
+
+    function tokenURI(uint256 tokenId) public view override returns (string memory) {
+        if (!_tokenExists(tokenId)) revert RevvFiErrors.PositionNotFound();
+
+        string memory baseURI = _baseTokenURI;
+        if (bytes(baseURI).length == 0) {
+            return "";
+        }
+
+        return string(abi.encodePacked(baseURI, "/position/", tokenId.toString(), ".json"));
+    }
+
+    function getPositionMetadata(uint256 tokenId)
+        external
+        view
+        returns (string memory name, string memory description, string memory image, string memory attributes)
+    {
+        if (!_tokenExists(tokenId)) revert RevvFiErrors.PositionNotFound();
+
+        Position memory pos = positions[tokenId];
+
+        name = string(abi.encodePacked(TOKEN_NAME, " #", tokenId.toString()));
+        description = string(
+            abi.encodePacked(
+                "RevvFi Position NFT representing a ", pos.isSenior ? "Senior" : "Junior", " lending position."
+            )
+        );
+        image = "https://revvfi.com/images/position-nft.png";
+        attributes = "";
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC721Enumerable) returns (bool) {
+        return super.supportsInterface(interfaceId);
     }
 }

@@ -10,12 +10,14 @@ interface IRevvFiLiquidator {
         address collateralAsset;
         uint256 collateralAmount;
         uint256 debtAmount;
+        uint256 reservePrice;
         uint256 startTime;
         uint256 endTime;
         uint256 highestBid;
         address highestBidder;
         bool active;
         bool settled;
+        bool collateralTransferred;
     }
 
     function createAuction(
@@ -32,4 +34,5 @@ interface IRevvFiLiquidator {
     function getAuction(uint256 auctionId) external view returns (Auction memory);
     function getWinningBid(uint256 auctionId) external view returns (address, uint256, uint256);
     function receiveCollateral(uint256 auctionId) external;
+    function getCurrentPrice(uint256 auctionId) external view returns (uint256);
 }

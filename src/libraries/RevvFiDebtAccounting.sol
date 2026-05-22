@@ -29,53 +29,32 @@ library RevvFiDebtAccounting {
     uint256 public constant SECONDS_PER_YEAR = 365 days;
     uint256 public constant BASIS_POINTS = 10000;
 
-    /**
-     * @dev Calculate interest accrued between two timestamps
-     * interest = principal * apr * elapsed / (SECONDS_PER_YEAR * BASIS_POINTS)
-     */
-    function calculateInterest(
-        uint256 principal,
-        uint256 apr,
-        uint256 elapsed
-    ) internal pure returns (uint256) {
+    function calculateInterest(uint256 principal, uint256 apr, uint256 elapsed) internal pure returns (uint256) {
         return (principal * apr * elapsed) / (SECONDS_PER_YEAR * BASIS_POINTS);
     }
 
     /**
      * @dev Calculate new cumulative index
-     * newIndex = oldIndex + (oldIndex * apr * elapsed / (SECONDS_PER_YEAR * BASIS_POINTS)) / RAY
+     * Formula: newIndex = oldIndex + (oldIndex * apr * elapsed) / (SECONDS_PER_YEAR * BASIS_POINTS)
      */
-    function updateIndex(
-        uint256 oldIndex,
-        uint256 apr,
-        uint256 elapsed
-    ) internal pure returns (uint256 newIndex) {
+    function updateIndex(uint256 oldIndex, uint256 apr, uint256 elapsed) internal pure returns (uint256 newIndex) {
         uint256 indexGrowth = (oldIndex * apr * elapsed) / (SECONDS_PER_YEAR * BASIS_POINTS);
-        newIndex = oldIndex + indexGrowth / RAY;
+        newIndex = oldIndex + indexGrowth;
     }
 
-    /**
-     * @dev Convert principal to shares using current index
-     */
     function principalToShares(uint256 principal, uint256 currentIndex) internal pure returns (uint256) {
         return (principal * RAY) / currentIndex;
     }
 
-    /**
-     * @dev Convert shares to principal using current index
-     */
     function sharesToPrincipal(uint256 shares, uint256 currentIndex) internal pure returns (uint256) {
         return (shares * currentIndex) / RAY;
     }
 
-    /**
-     * @dev Distribute repayment proportionally to lenders
-     */
-    function distributeRepayment(
-        uint256 totalActiveShares,
-        uint256 lenderShares,
-        uint256 repaymentAmount
-    ) internal pure returns (uint256 lenderRepayment) {
+    function distributeRepayment(uint256 totalActiveShares, uint256 lenderShares, uint256 repaymentAmount)
+        internal
+        pure
+        returns (uint256 lenderRepayment)
+    {
         if (totalActiveShares == 0) return 0;
         return (repaymentAmount * lenderShares) / totalActiveShares;
     }

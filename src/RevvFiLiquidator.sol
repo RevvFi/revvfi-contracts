@@ -18,6 +18,7 @@ contract RevvFiLiquidator is ReentrancyGuard {
         address collateralAsset;
         uint256 collateralAmount;
         uint256 debtAmount;
+        uint256 reservePrice;
         uint256 startTime;
         uint256 endTime;
         uint256 highestBid;
@@ -33,6 +34,8 @@ contract RevvFiLiquidator is ReentrancyGuard {
     uint256 public auctionDuration = 3 days;
     uint256 public minBidIncrementBps = 100;
     uint256 public auctionExtensionWindow = 15 minutes;
+    uint256 public dutchAuctionStepDuration = 1 hours;
+    uint256 public dutchAuctionPriceDecrementBps = 500; // 5% per step
 
     modifier onlyFactory() {
         if (msg.sender != factory) revert RevvFiErrors.UnauthorizedCaller();
@@ -52,8 +55,10 @@ contract RevvFiLiquidator is ReentrancyGuard {
         address collateralAsset,
         uint256 collateralAmount,
         uint256 debtAmount
-    ) external onlyFactory returns (uint256 auctionId) {
+    ) public onlyFactory returns (uint256 auctionId) {
         auctionId = nextAuctionId++;
+
+        uint256 reservePrice = (debtAmount * 80) / 100; // 80% of debt as reserve price
 
         auctions[auctionId] = Auction({
             id: auctionId,
@@ -63,6 +68,7 @@ contract RevvFiLiquidator is ReentrancyGuard {
             collateralAsset: collateralAsset,
             collateralAmount: collateralAmount,
             debtAmount: debtAmount,
+            reservePrice: reservePrice,
             startTime: block.timestamp,
             endTime: block.timestamp + auctionDuration,
             highestBid: 0,
@@ -85,6 +91,22 @@ contract RevvFiLiquidator is ReentrancyGuard {
         );
     }
 
+    function getCurrentPrice(uint256 auctionId) public view returns (uint256 currentPrice) {
+        Auction storage auction = auctions[auctionId];
+        if (!auction.active) return 0;
+
+        uint256 elapsed = block.timestamp - auction.startTime;
+        uint256 steps = elapsed / dutchAuctionStepDuration;
+
+        uint256 priceDecrement = (auction.debtAmount * dutchAuctionPriceDecrementBps * steps) / (10000);
+
+        if (priceDecrement >= auction.debtAmount - auction.reservePrice) {
+            currentPrice = auction.reservePrice;
+        } else {
+            currentPrice = auction.debtAmount - priceDecrement;
+        }
+    }
+
     function receiveCollateral(uint256 auctionId) external onlyFactory {
         Auction storage auction = auctions[auctionId];
         if (!auction.active) revert RevvFiErrors.AuctionNotFound();
@@ -96,20 +118,20 @@ contract RevvFiLiquidator is ReentrancyGuard {
         if (!auction.active) revert RevvFiErrors.AuctionNotFound();
         if (block.timestamp > auction.endTime) revert RevvFiErrors.AuctionEnded();
 
-        uint256 minBid =
-            auction.highestBid == 0 ? 1 : auction.highestBid + (auction.highestBid * minBidIncrementBps / 10000);
+        uint256 currentPrice = getCurrentPrice(auctionId);
+
+        uint256 minBid = auction.highestBid == 0
+            ? currentPrice
+            : auction.highestBid + (auction.highestBid * minBidIncrementBps / 10000);
         if (bidAmount < minBid) revert RevvFiErrors.BidTooLow();
         if (bidAmount > auction.debtAmount) revert RevvFiErrors.BidTooLow();
 
-        // Get token reference once
         IERC20 token = IERC20(auction.borrowAsset);
 
-        // REFUND PREVIOUS BIDDER
         if (auction.highestBidder != address(0) && auction.highestBid > 0) {
             token.safeTransfer(auction.highestBidder, auction.highestBid);
         }
 
-        // Transfer new bid amount
         token.safeTransferFrom(msg.sender, address(this), bidAmount);
 
         auction.highestBid = bidAmount;
@@ -128,7 +150,11 @@ contract RevvFiLiquidator is ReentrancyGuard {
         if (block.timestamp <= auction.endTime) revert RevvFiErrors.AuctionNotActive();
         if (auction.settled) revert RevvFiErrors.AuctionAlreadySettled();
 
-        if (auction.highestBidder == address(0)) revert RevvFiErrors.NoBids();
+        if (auction.highestBidder == address(0)) {
+            // No bids - trigger Dutch auction retry
+            _retryAuction(auctionId);
+            return;
+        }
 
         IERC20 borrowToken = IERC20(auction.borrowAsset);
         borrowToken.safeTransfer(auction.market, auction.highestBid);
@@ -147,6 +173,27 @@ contract RevvFiLiquidator is ReentrancyGuard {
             auction.highestBid,
             auction.highestBid
         );
+    }
+
+    function _retryAuction(uint256 oldAuctionId) internal {
+        Auction storage oldAuction = auctions[oldAuctionId];
+
+        uint256 newAuctionId = createAuction(
+            oldAuction.market,
+            oldAuction.borrower,
+            oldAuction.borrowAsset,
+            oldAuction.collateralAsset,
+            oldAuction.collateralAmount,
+            oldAuction.debtAmount
+        );
+
+        // Transfer collateral from old auction to new auction
+        IERC20 collateralToken = IERC20(oldAuction.collateralAsset);
+        collateralToken.safeTransfer(address(this), oldAuction.collateralAmount);
+
+        oldAuction.active = false;
+
+        emit RevvFiEvents.AuctionCancelled(oldAuctionId);
     }
 
     function cancelAuction(uint256 auctionId) external onlyFactory {
@@ -185,5 +232,10 @@ contract RevvFiLiquidator is ReentrancyGuard {
 
     function setAuctionExtensionWindow(uint256 newWindow) external onlyFactory {
         auctionExtensionWindow = newWindow;
+    }
+
+    function setDutchAuctionParams(uint256 stepDuration, uint256 decrementBps) external onlyFactory {
+        dutchAuctionStepDuration = stepDuration;
+        dutchAuctionPriceDecrementBps = decrementBps;
     }
 }

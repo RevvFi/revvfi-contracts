@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.33;
 
-/**
- * @title RevvFiErrors
- * @notice Centralized error definitions for all RevvFi contracts
- * @dev All protocol contracts should import and use these errors
- */
 library RevvFiErrors {
     // ========================================================================== //
     //                              Generic Errors                                //
@@ -67,6 +62,7 @@ library RevvFiErrors {
     error NoInterestToClaim();
     error EpochNotComplete();
     error WithdrawalTooEarly();
+    error TooManyActivePositions();
 
     // ========================================================================== //
     //                              OfferBook Errors                              //
@@ -115,5 +111,10 @@ library RevvFiErrors {
     error DeploymentFailed();
     error PendingArchControllerNotSet();
     error FeeTransferFailed();
-}
 
+    // ========================================================================== //
+    //                           Reputation Errors                                //
+    // ========================================================================== //
+
+    error BorrowerNotRegisteredForReputation();
+}

@@ -10,6 +10,8 @@ import "./RevvFiOfferBook.sol";
 import "./RevvFiPositionNFT.sol";
 import "./RevvFiLiquidator.sol";
 import "./RevvFiMarket.sol";
+import "./RevvFiLiquidityQueue.sol";
+import "./ReputationRegistry.sol";
 import "./libraries/RevvFiErrors.sol";
 import "./libraries/RevvFiEvents.sol";
 
@@ -17,6 +19,7 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
     RevvFiArchController public archController;
     RevvFiPositionNFT public positionNFT;
     RevvFiLiquidator public liquidator;
+    ReputationRegistry public reputationRegistry;
 
     uint256 public deploymentFee;
     address public feeRecipient;
@@ -37,6 +40,7 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
 
         positionNFT = new RevvFiPositionNFT(address(this));
         liquidator = new RevvFiLiquidator(address(this));
+        reputationRegistry = new ReputationRegistry(address(this));
 
         archController.registerControllerFactory(address(this));
     }
@@ -57,25 +61,17 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         (bool feeSent,) = feeRecipient.call{value: deploymentFee}("");
         if (!feeSent) revert RevvFiErrors.FeeTransferFailed();
 
-        RevvFiMarket market = new RevvFiMarket(
-            address(this),
-            address(archController),
-            borrower,
-            borrowAsset,
-            collateralAsset
-        );
+        // Register borrower with reputation registry
+        reputationRegistry.registerBorrower(borrower);
+
+        RevvFiMarket market =
+            new RevvFiMarket(address(this), address(archController), borrower, borrowAsset, collateralAsset);
 
         marketAddress = address(market);
 
         RevvFiCollateralEscrow collateralEscrow = new RevvFiCollateralEscrow(address(this));
         collateralEscrow.initialize(
-            marketAddress,
-            borrower,  // Pass borrower address here
-            borrowAsset,
-            collateralAsset,
-            collateralOracle,
-            collateralDecimals,
-            borrowDecimals
+            marketAddress, borrower, borrowAsset, collateralAsset, collateralOracle, collateralDecimals, borrowDecimals
         );
         collateralEscrow.setMinCollateralRatio(minCollateralRatio);
         collateralEscrow.setLiquidationThreshold(liquidationThreshold);
@@ -83,7 +79,17 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         RevvFiOfferBook offerBook = new RevvFiOfferBook(address(this));
         offerBook.initialize(marketAddress, borrowAsset);
 
-        market.setContracts(address(collateralEscrow), address(offerBook), address(positionNFT), address(liquidator));
+        // Deploy LiquidityQueue for this market
+        RevvFiLiquidityQueue liquidityQueue =
+            new RevvFiLiquidityQueue(marketAddress, address(this), address(positionNFT));
+
+        market.setContracts(
+            address(collateralEscrow),
+            address(offerBook),
+            address(positionNFT),
+            address(liquidator),
+            address(reputationRegistry)
+        );
 
         archController.registerMarket(marketAddress);
         allMarkets.push(marketAddress);
