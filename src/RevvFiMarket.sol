@@ -355,10 +355,14 @@ contract RevvFiMarket is ReentrancyGuard {
 
         _distributeRepayment(amount);
 
-        // FIXED: Use standard subtraction with underflow protection
+        // FIXED: Use standard subtraction with underflow protection (no satSub)
         if (amount >= totalAccruedInterest) {
             uint256 principalPortion = amount - totalAccruedInterest;
-            totalPrincipal = totalPrincipal > principalPortion ? totalPrincipal - principalPortion : 0;
+            if (totalPrincipal > principalPortion) {
+                totalPrincipal -= principalPortion;
+            } else {
+                totalPrincipal = 0;
+            }
             totalAccruedInterest = 0;
         } else {
             totalAccruedInterest -= amount;
@@ -374,7 +378,7 @@ contract RevvFiMarket is ReentrancyGuard {
 
         // First, distribute to accrued interest (proportional by position interest)
         if (totalAccruedInterest > 0 && remainingRepayment > 0) {
-            uint256 interestPayment = remainingRepayment.min(totalAccruedInterest);
+            uint256 interestPayment = remainingRepayment < totalAccruedInterest ? remainingRepayment : totalAccruedInterest;
 
             for (uint256 i = 0; i < activePositionIds.length && interestPayment > 0; i++) {
                 uint256 posId = activePositionIds[i];
@@ -393,7 +397,7 @@ contract RevvFiMarket is ReentrancyGuard {
 
         // Then, distribute to principal (proportional by position principal)
         if (totalPrincipal > 0 && remainingRepayment > 0) {
-            uint256 principalPayment = remainingRepayment.min(totalPrincipal);
+            uint256 principalPayment = remainingRepayment < totalPrincipal ? remainingRepayment : totalPrincipal;
 
             for (uint256 i = 0; i < activePositionIds.length && principalPayment > 0; i++) {
                 uint256 posId = activePositionIds[i];
@@ -541,9 +545,19 @@ contract RevvFiMarket is ReentrancyGuard {
 
         if (debtRepaid > 0) {
             _distributeRepayment(debtRepaid);
-            totalPrincipal =
-                totalPrincipal.satSub(debtRepaid > totalAccruedInterest ? debtRepaid - totalAccruedInterest : 0);
-            totalAccruedInterest = totalAccruedInterest.satSub(debtRepaid);
+            
+            // FIXED: Standard subtraction without satSub
+            if (debtRepaid >= totalAccruedInterest) {
+                uint256 principalPortion = debtRepaid - totalAccruedInterest;
+                if (totalPrincipal > principalPortion) {
+                    totalPrincipal -= principalPortion;
+                } else {
+                    totalPrincipal = 0;
+                }
+                totalAccruedInterest = 0;
+            } else {
+                totalAccruedInterest -= debtRepaid;
+            }
         }
 
         if (address(reputationRegistry) != address(0)) {
@@ -589,7 +603,11 @@ contract RevvFiMarket is ReentrancyGuard {
                 } else {
                     reduction -= positionAccruedInterest[posId];
                     positionAccruedInterest[posId] = 0;
-                    positionPrincipal[posId] = positionPrincipal[posId].satSub(reduction);
+                    if (positionPrincipal[posId] > reduction) {
+                        positionPrincipal[posId] -= reduction;
+                    } else {
+                        positionPrincipal[posId] = 0;
+                    }
                 }
                 remainingLoss = 0;
             } else {
@@ -614,7 +632,11 @@ contract RevvFiMarket is ReentrancyGuard {
                 } else {
                     reduction -= positionAccruedInterest[posId];
                     positionAccruedInterest[posId] = 0;
-                    positionPrincipal[posId] = positionPrincipal[posId].satSub(reduction);
+                    if (positionPrincipal[posId] > reduction) {
+                        positionPrincipal[posId] -= reduction;
+                    } else {
+                        positionPrincipal[posId] = 0;
+                    }
                 }
                 remainingLoss = 0;
             } else {
