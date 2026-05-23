@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -41,8 +41,6 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         positionNFT = new RevvFiPositionNFT(address(this));
         liquidator = new RevvFiLiquidator(address(this));
         reputationRegistry = new ReputationRegistry(address(this));
-
-        archController.registerControllerFactory(address(this));
     }
 
     function deployMarket(
@@ -91,6 +89,9 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
             address(reputationRegistry)
         );
 
+        // After market.setContracts(...)
+        reputationRegistry.registerMarket(marketAddress);
+
         archController.registerMarket(marketAddress);
         allMarkets.push(marketAddress);
 
@@ -105,6 +106,12 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
 
     function getMarketsCount() external view returns (uint256) {
         return allMarkets.length;
+    }
+
+    function registerWithArchController() external onlyOwner {
+        archController.registerControllerFactory(address(this));
+        // Also register the factory as a controller so it can register markets
+        archController.registerController(address(this));
     }
 
     function setDeploymentFee(uint256 newFee) external onlyOwner {

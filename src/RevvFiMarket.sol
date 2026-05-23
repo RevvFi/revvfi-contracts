@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -255,9 +255,12 @@ contract RevvFiMarket is ReentrancyGuard {
         if (amount == 0) revert RevvFiErrors.ZeroAmount();
 
         IERC20 collateral = IERC20(collateralAsset);
+        // Transfer from borrower to market
         collateral.safeTransferFrom(msg.sender, address(this), amount);
+        // Approve escrow to spend from market
         collateral.forceApprove(address(collateralEscrow), amount);
 
+        // Escrow will transfer from market (msg.sender is market)
         collateralEscrow.depositCollateral(borrower, amount);
     }
 
@@ -378,7 +381,8 @@ contract RevvFiMarket is ReentrancyGuard {
 
         // First, distribute to accrued interest (proportional by position interest)
         if (totalAccruedInterest > 0 && remainingRepayment > 0) {
-            uint256 interestPayment = remainingRepayment < totalAccruedInterest ? remainingRepayment : totalAccruedInterest;
+            uint256 interestPayment =
+                remainingRepayment < totalAccruedInterest ? remainingRepayment : totalAccruedInterest;
 
             for (uint256 i = 0; i < activePositionIds.length && interestPayment > 0; i++) {
                 uint256 posId = activePositionIds[i];
@@ -545,7 +549,7 @@ contract RevvFiMarket is ReentrancyGuard {
 
         if (debtRepaid > 0) {
             _distributeRepayment(debtRepaid);
-            
+
             // FIXED: Standard subtraction without satSub
             if (debtRepaid >= totalAccruedInterest) {
                 uint256 principalPortion = debtRepaid - totalAccruedInterest;
@@ -680,6 +684,10 @@ contract RevvFiMarket is ReentrancyGuard {
 
     function totalAssets() public view returns (uint256) {
         return IERC20(borrowAsset).balanceOf(address(this));
+    }
+
+    function triggerAccrueInterest() external {
+        _accrueInterest();
     }
 
     function getTotalOwed() public view returns (uint256) {

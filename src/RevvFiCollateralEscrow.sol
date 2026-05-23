@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -21,12 +21,11 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant DEFAULT_MIN_COLLATERAL_RATIO = 10000;
     uint256 public constant DEFAULT_LIQUIDATION_THRESHOLD = 9500;
-    uint256 public constant WARNING_THRESHOLD = 10500; // 105% - Ratio must be above this to be healthy
     uint256 public constant STALE_PRICE_THRESHOLD = 2 hours;
 
     address public immutable factory;
     address public market;
-    address public borrower; // ADDED: store borrower address
+    address public borrower;
     address public borrowAsset;
     address public collateralAsset;
 
@@ -42,7 +41,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
     uint256 public liquidationThreshold;
 
     bool public isInitialized;
-    bool public liquidationActive; // Simplified - only one borrower per market
+    bool public liquidationActive;
 
     modifier onlyMarket() {
         if (msg.sender != market) revert RevvFiErrors.UnauthorizedCaller();
@@ -104,7 +103,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         if (amount == 0) revert RevvFiErrors.ZeroAmount();
 
         IERC20 token = IERC20(collateralAsset);
-        token.safeTransferFrom(borrowerAddr, address(this), amount);
+        token.safeTransferFrom(msg.sender, address(this), amount);
 
         collateralBalance[borrowerAddr] += amount;
         totalCollateral += amount;
@@ -176,7 +175,15 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
             IAggregatorV3Interface(collateralOracle).latestRoundData();
 
         if (price <= 0) revert RevvFiErrors.OracleNotSet();
-        if (updatedAt < block.timestamp - STALE_PRICE_THRESHOLD) revert RevvFiErrors.OraclePriceStale();
+
+        if (updatedAt == 0) {
+            revert RevvFiErrors.OraclePriceStale();
+        }
+
+        if (block.timestamp > updatedAt + STALE_PRICE_THRESHOLD) {
+            revert RevvFiErrors.OraclePriceStale();
+        }
+
         if (answeredInRound < roundId) revert RevvFiErrors.OraclePriceStale();
 
         return uint256(price);
@@ -196,12 +203,6 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         return ratio < liquidationThreshold;
     }
 
-    /**
-     * @dev Get detailed health status with three states: HEALTHY, WARNING, LIQUIDATABLE
-     * HEALTHY: ratio >= minCollateralRatio
-     * WARNING: liquidationThreshold <= ratio < minCollateralRatio (allows recovery window)
-     * LIQUIDATABLE: ratio < liquidationThreshold
-     */
     function getHealthStatus(address borrowerAddr, uint256 debt) external view returns (HealthStatus) {
         if (debt == 0) return HealthStatus.HEALTHY;
 
@@ -261,6 +262,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard {
         return liquidationActive;
     }
 
+    // ADD THESE MISSING FUNCTIONS:
     function setMinCollateralRatio(uint256 newRatio) external onlyFactory {
         if (newRatio == 0 || newRatio > BASIS_POINTS * 2) revert RevvFiErrors.CollateralBelowMinimum();
         if (newRatio < liquidationThreshold) revert RevvFiErrors.InvalidCollateralRatio();

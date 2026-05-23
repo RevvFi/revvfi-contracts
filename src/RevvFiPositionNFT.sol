@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
@@ -37,9 +37,8 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
         _;
     }
 
-    // FIXED: Allow both factory AND approved markets to call certain functions
-    modifier onlyApprovedMarket() {
-        if (!approvedMarkets[msg.sender] && msg.sender != factory) {
+    modifier onlyApprovedMarket(address market) {
+        if (!approvedMarkets[market] && msg.sender != factory) {
             revert RevvFiErrors.MarketNotRegistered();
         }
         _;
@@ -52,7 +51,12 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
         _baseTokenURI = "";
     }
 
-    function registerMarket(address market) external onlyFactory {
+    // FIXED: Allow market to register itself during initialization
+    function registerMarket(address market) external {
+        // Allow factory OR the market itself to register
+        if (msg.sender != factory && msg.sender != market) {
+            revert RevvFiErrors.UnauthorizedCaller();
+        }
         if (market == address(0)) revert RevvFiErrors.ZeroAddress();
         if (approvedMarkets[market]) revert RevvFiErrors.MarketAlreadyRegistered();
         approvedMarkets[market] = true;
@@ -67,7 +71,7 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
 
     function mintPosition(address lender, address market, uint256 principal, uint256 apr, uint8 seniority)
         external
-        onlyApprovedMarket
+        onlyApprovedMarket(market)
         returns (uint256 tokenId)
     {
         tokenId = _nextTokenId;
@@ -86,16 +90,44 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
 
         lenderPositions[lender].push(tokenId);
         lenderPositionIndex[lender][tokenId] = lenderPositions[lender].length - 1;
+
         _safeMint(lender, tokenId);
 
         emit RevvFiEvents.PositionMinted(tokenId, lender, market, principal, apr, seniority);
         return tokenId;
     }
 
+    function redeemPosition(uint256 tokenId) external onlyApprovedMarket(positions[tokenId].market) {
+        Position storage pos = positions[tokenId];
+        if (!pos.active) revert RevvFiErrors.PositionNotFound();
+
+        pos.active = false;
+        _burn(tokenId);
+
+        emit RevvFiEvents.PositionRedeemed(tokenId, pos.principal, 0);
+    }
+
     function _update(address to, uint256 tokenId, address auth) internal override returns (address) {
         address from = _ownerOf(tokenId);
 
-        if (from != address(0)) {
+        // Only handle transfers (not mints or burns)
+        if (from != address(0) && to != address(0)) {
+            // Remove from old owner
+            uint256[] storage fromPositions = lenderPositions[from];
+            uint256 index = lenderPositionIndex[from][tokenId];
+            uint256 lastId = fromPositions[fromPositions.length - 1];
+
+            fromPositions[index] = lastId;
+            lenderPositionIndex[from][lastId] = index;
+            fromPositions.pop();
+            delete lenderPositionIndex[from][tokenId];
+
+            // Add to new owner
+            lenderPositionIndex[to][tokenId] = lenderPositions[to].length;
+            lenderPositions[to].push(tokenId);
+        }
+        // For burns (to == address(0)), remove from owner's list
+        else if (from != address(0) && to == address(0)) {
             uint256[] storage fromPositions = lenderPositions[from];
             uint256 index = lenderPositionIndex[from][tokenId];
             uint256 lastId = fromPositions[fromPositions.length - 1];
@@ -105,27 +137,13 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
             fromPositions.pop();
             delete lenderPositionIndex[from][tokenId];
         }
-
-        if (to != address(0)) {
-            lenderPositionIndex[to][tokenId] = lenderPositions[to].length;
-            lenderPositions[to].push(tokenId);
-        }
+        // For mints (from == address(0)), do nothing - already added in mintPosition
 
         return super._update(to, tokenId, auth);
     }
 
     function getLenderByTokenId(uint256 tokenId) public view returns (address) {
         return ownerOf(tokenId);
-    }
-
-    function redeemPosition(uint256 tokenId) external onlyApprovedMarket {
-        Position storage pos = positions[tokenId];
-        if (!pos.active) revert RevvFiErrors.PositionNotFound();
-
-        pos.active = false;
-        _burn(tokenId);
-
-        emit RevvFiEvents.PositionRedeemed(tokenId, pos.principal, 0);
     }
 
     function getPosition(uint256 tokenId) external view returns (Position memory) {

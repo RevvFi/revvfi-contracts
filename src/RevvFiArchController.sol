@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.33;
 
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
@@ -101,7 +101,11 @@ contract RevvFiArchController is Ownable {
     //                            Controller Factories                            //
     // ========================================================================== //
 
-    function registerControllerFactory(address factory) external onlyOwner {
+    function registerControllerFactory(address factory) external {
+        // Allow if caller is owner OR if the factory is registering itself and is not yet registered
+        if (msg.sender != owner() && (msg.sender != factory || _controllerFactories.contains(factory))) {
+            revert RevvFiErrors.UnauthorizedCaller();
+        }
         if (factory == address(0)) revert RevvFiErrors.ZeroAddressNotAllowed();
         if (!_controllerFactories.add(factory)) revert RevvFiErrors.ControllerFactoryAlreadyExists();
         emit RevvFiEvents.ControllerFactoryAdded(factory);

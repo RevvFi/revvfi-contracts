@@ -4,29 +4,12 @@ pragma solidity 0.8.33;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./interfaces/IRevvFiLiquidator.sol";
 import "./libraries/RevvFiErrors.sol";
 import "./libraries/RevvFiEvents.sol";
 
-contract RevvFiLiquidator is ReentrancyGuard {
+contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
     using SafeERC20 for IERC20;
-
-    struct Auction {
-        uint256 id;
-        address market;
-        address borrower;
-        address borrowAsset;
-        address collateralAsset;
-        uint256 collateralAmount;
-        uint256 debtAmount;
-        uint256 reservePrice;
-        uint256 startTime;
-        uint256 endTime;
-        uint256 highestBid;
-        address highestBidder;
-        bool active;
-        bool settled;
-        bool collateralTransferred;
-    }
 
     address public immutable factory;
     mapping(uint256 => Auction) public auctions;
@@ -35,7 +18,7 @@ contract RevvFiLiquidator is ReentrancyGuard {
     uint256 public minBidIncrementBps = 100;
     uint256 public auctionExtensionWindow = 15 minutes;
     uint256 public dutchAuctionStepDuration = 1 hours;
-    uint256 public dutchAuctionPriceDecrementBps = 500; // 5% per step
+    uint256 public dutchAuctionPriceDecrementBps = 500;
 
     modifier onlyFactory() {
         if (msg.sender != factory) revert RevvFiErrors.UnauthorizedCaller();
@@ -58,7 +41,7 @@ contract RevvFiLiquidator is ReentrancyGuard {
     ) public onlyFactory returns (uint256 auctionId) {
         auctionId = nextAuctionId++;
 
-        uint256 reservePrice = (debtAmount * 80) / 100; // 80% of debt as reserve price
+        uint256 reservePrice = (debtAmount * 80) / 100;
 
         auctions[auctionId] = Auction({
             id: auctionId,
@@ -151,7 +134,6 @@ contract RevvFiLiquidator is ReentrancyGuard {
         if (auction.settled) revert RevvFiErrors.AuctionAlreadySettled();
 
         if (auction.highestBidder == address(0)) {
-            // No bids - trigger Dutch auction retry
             _retryAuction(auctionId);
             return;
         }
@@ -187,7 +169,6 @@ contract RevvFiLiquidator is ReentrancyGuard {
             oldAuction.debtAmount
         );
 
-        // Transfer collateral from old auction to new auction
         IERC20 collateralToken = IERC20(oldAuction.collateralAsset);
         collateralToken.safeTransfer(address(this), oldAuction.collateralAmount);
 

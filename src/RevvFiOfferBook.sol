@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -170,7 +170,7 @@ contract RevvFiOfferBook is ReentrancyGuard {
         // Calculate filled amount (amount that has been borrowed)
         uint256 filledAmount = offer.amount - offer.remainingAmount;
 
-        // FIXED: Check that newAmount is not less than filledAmount
+        // Check BEFORE any token transfers
         if (newAmount < filledAmount) revert RevvFiErrors.InsufficientOfferAmount();
 
         uint256 newRemaining = newAmount - filledAmount;

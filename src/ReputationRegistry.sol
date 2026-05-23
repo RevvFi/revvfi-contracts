@@ -3,31 +3,15 @@ pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./interfaces/IReputationRegistry.sol";
 import "./libraries/RevvFiErrors.sol";
 import "./libraries/RevvFiEvents.sol";
 
-contract ReputationRegistry is Ownable, ReentrancyGuard {
-    enum RiskLabel {
-        AAA,
-        AA,
-        A,
-        B,
-        C,
-        D,
-        UNRATED
-    }
-
-    struct BorrowerProfile {
-        address borrower;
-        uint256 totalBorrowed;
-        uint256 totalRepaid;
-        uint256 successfulLoans;
-        uint256 defaultedLoans;
-        uint256 reputationScore;
-        uint256 lastUpdateTime;
-    }
-
+contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
     address public factory;
+
+    // Add a mapping for approved markets
+    mapping(address => bool) public approvedMarkets;
 
     mapping(address => BorrowerProfile) public borrowerProfiles;
     mapping(address => bool) public registeredBorrowers;
@@ -37,9 +21,23 @@ contract ReputationRegistry is Ownable, ReentrancyGuard {
         _;
     }
 
+    // Add modifier for approved markets (markets are registered as controllers)
+    modifier onlyApprovedMarket() {
+        if (!approvedMarkets[msg.sender] && msg.sender != factory) {
+            revert RevvFiErrors.UnauthorizedCaller();
+        }
+        _;
+    }
+
     constructor(address _factory) Ownable(msg.sender) {
         if (_factory == address(0)) revert RevvFiErrors.ZeroAddress();
         factory = _factory;
+    }
+
+    // Add function to register markets
+    function registerMarket(address market) external onlyFactory {
+        if (market == address(0)) revert RevvFiErrors.ZeroAddress();
+        approvedMarkets[market] = true;
     }
 
     function registerBorrower(address borrower) external onlyFactory {
@@ -60,7 +58,8 @@ contract ReputationRegistry is Ownable, ReentrancyGuard {
         emit RevvFiEvents.BorrowerRegistered(borrower);
     }
 
-    function recordBorrowActivity(address borrower, uint256 borrowAmount) external onlyFactory {
+    // Change to onlyApprovedMarket (so markets can call it)
+    function recordBorrowActivity(address borrower, uint256 borrowAmount) external onlyApprovedMarket {
         if (!registeredBorrowers[borrower]) revert RevvFiErrors.BorrowerNotRegistered();
 
         BorrowerProfile storage profile = borrowerProfiles[borrower];
@@ -70,7 +69,8 @@ contract ReputationRegistry is Ownable, ReentrancyGuard {
         emit RevvFiEvents.BorrowActivityRecorded(borrower, borrowAmount);
     }
 
-    function recordSuccessfulRepayment(address borrower, uint256 repaidAmount) external onlyFactory {
+    // Change to onlyApprovedMarket
+    function recordSuccessfulRepayment(address borrower, uint256 repaidAmount) external onlyApprovedMarket {
         if (!registeredBorrowers[borrower]) revert RevvFiErrors.BorrowerNotRegistered();
 
         BorrowerProfile storage profile = borrowerProfiles[borrower];
@@ -85,7 +85,11 @@ contract ReputationRegistry is Ownable, ReentrancyGuard {
         emit RevvFiEvents.ReputationScoreUpdated(borrower, oldScore, profile.reputationScore);
     }
 
-    function recordDefault(address borrower, uint256 originalDebt, uint256 recoveredAmount) external onlyFactory {
+    // Change to onlyApprovedMarket
+    function recordDefault(address borrower, uint256 originalDebt, uint256 recoveredAmount)
+        external
+        onlyApprovedMarket
+    {
         if (!registeredBorrowers[borrower]) revert RevvFiErrors.BorrowerNotRegistered();
 
         BorrowerProfile storage profile = borrowerProfiles[borrower];
