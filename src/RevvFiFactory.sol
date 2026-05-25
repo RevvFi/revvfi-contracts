@@ -15,21 +15,49 @@ import "./ReputationRegistry.sol";
 import "./libraries/RevvFiErrors.sol";
 import "./libraries/RevvFiEvents.sol";
 
+/**
+ * @title RevvFiFactory
+ * @author Preet Singh
+ * @notice Deploys and manages all lending markets and their associated components
+ * @dev Creates a complete lending market with escrow, offer book, and liquidity queue
+ */
 contract RevvFiFactory is Ownable, ReentrancyGuard {
+    /// @dev Central registry controlling permissions and listings
     RevvFiArchController public archController;
+
+    /// @dev NFT contract representing lender positions
     RevvFiPositionNFT public positionNFT;
+
+    /// @dev Contract that handles liquidations and auctions
     RevvFiLiquidator public liquidator;
+
+    /// @dev Contract that tracks borrower reputation
     ReputationRegistry public reputationRegistry;
 
+    /// @dev Fee charged for deploying a new market
     uint256 public deploymentFee;
+
+    /// @dev Address that receives deployment fees
     address public feeRecipient;
 
+    /// @dev List of all markets deployed by this factory
     address[] public allMarkets;
 
+    /// @dev Pending arch controller address for update (timelock protected)
     address public pendingArchController;
+
+    /// @dev Timestamp when arch controller update can be executed
     uint256 public archControllerUpdateTimelock;
+
+    /// @dev Required waiting period for arch controller updates
     uint256 public constant TIMELOCK_DURATION = 2 days;
 
+    /**
+     * @dev Sets up factory with arch controller and fee configuration
+     * @param _archController Address of the arch controller contract
+     * @param _feeRecipient Address that receives deployment fees
+     * @param _deploymentFee Fee charged per market deployment
+     */
     constructor(address _archController, address _feeRecipient, uint256 _deploymentFee) Ownable(msg.sender) {
         if (_archController == address(0)) revert RevvFiErrors.ZeroAddress();
         if (_feeRecipient == address(0)) revert RevvFiErrors.ZeroAddress();
@@ -43,6 +71,18 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         reputationRegistry = new ReputationRegistry(address(this));
     }
 
+    /**
+     * @dev Deploys a complete lending market with all components
+     * @param borrower Address that will control the market
+     * @param borrowAsset Token that lenders will provide
+     * @param collateralAsset Token that borrowers will lock
+     * @param collateralOracle Chainlink oracle for collateral pricing
+     * @param collateralDecimals Decimals of collateral token
+     * @param borrowDecimals Decimals of borrow token
+     * @param minCollateralRatio Minimum required collateral ratio
+     * @param liquidationThreshold Threshold for liquidation
+     * @return marketAddress Address of the newly deployed market
+     */
     function deployMarket(
         address borrower,
         address borrowAsset,
@@ -59,7 +99,7 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         (bool feeSent,) = feeRecipient.call{value: deploymentFee}("");
         if (!feeSent) revert RevvFiErrors.FeeTransferFailed();
 
-        // Register borrower with reputation registry
+        // Register borrower with reputation system
         reputationRegistry.registerBorrower(borrower);
 
         RevvFiMarket market =
@@ -67,6 +107,7 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
 
         marketAddress = address(market);
 
+        // Create and configure collateral escrow
         RevvFiCollateralEscrow collateralEscrow = new RevvFiCollateralEscrow(address(this));
         collateralEscrow.initialize(
             marketAddress, borrower, borrowAsset, collateralAsset, collateralOracle, collateralDecimals, borrowDecimals
@@ -74,13 +115,15 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         collateralEscrow.setMinCollateralRatio(minCollateralRatio);
         collateralEscrow.setLiquidationThreshold(liquidationThreshold);
 
+        // Create offer book for lending offers
         RevvFiOfferBook offerBook = new RevvFiOfferBook(address(this));
         offerBook.initialize(marketAddress, borrowAsset);
 
-        // Deploy LiquidityQueue for this market
+        // Create liquidity queue for withdrawal management
         RevvFiLiquidityQueue liquidityQueue =
             new RevvFiLiquidityQueue(marketAddress, address(this), address(positionNFT));
 
+        // Connect all contracts to the market
         market.setContracts(
             address(collateralEscrow),
             address(offerBook),
@@ -89,9 +132,9 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
             address(reputationRegistry)
         );
 
-        // After market.setContracts(...)
+        // Register market with all necessary systems
         reputationRegistry.registerMarket(marketAddress);
-
+        liquidator.registerMarket(marketAddress);
         archController.registerMarket(marketAddress);
         allMarkets.push(marketAddress);
 
@@ -100,30 +143,52 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         );
     }
 
+    /**
+     * @dev Returns all deployed markets
+     * @return Array of market addresses
+     */
     function getAllMarkets() external view returns (address[] memory) {
         return allMarkets;
     }
 
+    /**
+     * @dev Returns total number of deployed markets
+     * @return Count of markets
+     */
     function getMarketsCount() external view returns (uint256) {
         return allMarkets.length;
     }
 
+    /**
+     * @dev Registers the factory with the arch controller (owner only)
+     */
     function registerWithArchController() external onlyOwner {
         archController.registerControllerFactory(address(this));
-        // Also register the factory as a controller so it can register markets
         archController.registerController(address(this));
     }
 
+    /**
+     * @dev Updates deployment fee (owner only)
+     * @param newFee New fee amount in ETH
+     */
     function setDeploymentFee(uint256 newFee) external onlyOwner {
         emit RevvFiEvents.FeeUpdated(deploymentFee, newFee);
         deploymentFee = newFee;
     }
 
+    /**
+     * @dev Updates fee recipient address (owner only)
+     * @param newRecipient New fee recipient address
+     */
     function setFeeRecipient(address newRecipient) external onlyOwner {
         if (newRecipient == address(0)) revert RevvFiErrors.ZeroAddress();
         feeRecipient = newRecipient;
     }
 
+    /**
+     * @dev Requests an arch controller update with timelock (owner only)
+     * @param newArchController Address of new arch controller
+     */
     function requestArchControllerUpdate(address newArchController) external onlyOwner {
         if (newArchController == address(0)) revert RevvFiErrors.ZeroAddress();
         pendingArchController = newArchController;
@@ -131,6 +196,9 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         emit RevvFiEvents.ArchControllerUpdateRequested(newArchController);
     }
 
+    /**
+     * @dev Executes pending arch controller update after timelock (owner only)
+     */
     function executeArchControllerUpdate() external onlyOwner {
         if (pendingArchController == address(0)) revert RevvFiErrors.PendingArchControllerNotSet();
         if (block.timestamp < archControllerUpdateTimelock) revert RevvFiErrors.UnauthorizedCaller();
@@ -144,6 +212,9 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         emit RevvFiEvents.ArchControllerUpdated(oldArchController, address(archController));
     }
 
+    /**
+     * @dev Cancels pending arch controller update (owner only)
+     */
     function cancelArchControllerUpdate() external onlyOwner {
         pendingArchController = address(0);
         archControllerUpdateTimelock = 0;

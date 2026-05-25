@@ -44,7 +44,7 @@ contract RevvFiCollateralEscrowTest is Test {
         // Set up borrower with tokens and approve the MARKET (not the escrow directly)
         vm.startPrank(borrower);
         collateralToken.mint(borrower, 10 ether);
-        collateralToken.approve(market, 10 ether);  // Approve the market, not the escrow
+        collateralToken.approve(market, 10 ether); // Approve the market, not the escrow
         vm.stopPrank();
 
         // Simulate what the market would do: transfer from borrower to market, then call escrow
@@ -138,14 +138,12 @@ contract RevvFiCollateralEscrowTest is Test {
     function test_GetHealthStatus() public view {
         // Healthy: ratio >= 100% (minCollateralRatio = 10000)
         assertEq(
-            uint256(escrow.getHealthStatus(borrower, 10000e6)),
-            uint256(RevvFiCollateralEscrow.HealthStatus.HEALTHY)
+            uint256(escrow.getHealthStatus(borrower, 10000e6)), uint256(RevvFiCollateralEscrow.HealthStatus.HEALTHY)
         );
 
         // Warning: 95% <= ratio < 100%
         assertEq(
-            uint256(escrow.getHealthStatus(borrower, 20500e6)),
-            uint256(RevvFiCollateralEscrow.HealthStatus.WARNING)
+            uint256(escrow.getHealthStatus(borrower, 20500e6)), uint256(RevvFiCollateralEscrow.HealthStatus.WARNING)
         );
 
         // Liquidatable: ratio < 95%
@@ -203,7 +201,7 @@ contract RevvFiCollateralEscrowTest is Test {
         escrow.setMinCollateralRatio(newRatio);
 
         assertEq(escrow.minCollateralRatio(), newRatio);
-        
+
         // Reset for other tests (though each test gets fresh state)
     }
 
