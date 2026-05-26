@@ -40,9 +40,6 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
     /// @dev Address that receives deployment fees
     address public feeRecipient;
 
-    /// @dev List of all markets deployed by this factory
-    address[] public allMarkets;
-
     /// @dev Pending arch controller address for update (timelock protected)
     address public pendingArchController;
 
@@ -135,7 +132,10 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         if (msg.value != deploymentFee) revert RevvFiErrors.InsufficientFee();
         if (!archController.isRegisteredBorrower(borrower)) revert RevvFiErrors.BorrowerNotRegistered();
         
-        // Validate asset approvals through arch controller
+        // Prevent borrowing and collateral being the same asset
+        if (borrowAsset == collateralAsset) revert RevvFiErrors.SameAssetNotAllowed();
+        
+        // Validate assets are not blacklisted
         if (archController.isBlacklistedAsset(borrowAsset)) revert RevvFiErrors.AssetBlacklisted();
         if (archController.isBlacklistedAsset(collateralAsset)) revert RevvFiErrors.AssetBlacklisted();
         if (archController.isBlacklistedAsset(collateralOracle)) revert RevvFiErrors.OracleBlacklisted();
@@ -180,42 +180,14 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         );
 
         // Register market with all necessary systems
+        // ArchController is the SINGLE SOURCE OF TRUTH for all markets
         reputationRegistry.registerMarket(marketAddress);
         liquidator.registerMarket(marketAddress);
         archController.registerMarket(marketAddress);
-        allMarkets.push(marketAddress);
 
         emit RevvFiEvents.MarketDeployed(
             marketAddress, borrower, borrowAsset, collateralAsset, collateralOracle, block.timestamp
         );
-    }
-
-    /**
-     * @dev Returns paginated list of deployed markets
-     * @param start Starting index
-     * @param end Ending index (exclusive)
-     * @return Array of market addresses in the specified range
-     */
-    function getMarkets(uint256 start, uint256 end) external view returns (address[] memory) {
-        uint256 len = allMarkets.length;
-        if (start >= end || start >= len) {
-            return new address[](0);
-        }
-        end = end > len ? len : end;
-        uint256 count = end - start;
-        address[] memory result = new address[](count);
-        for (uint256 i = 0; i < count; i++) {
-            result[i] = allMarkets[start + i];
-        }
-        return result;
-    }
-
-    /**
-     * @dev Returns total number of deployed markets
-     * @return Count of markets
-     */
-    function getMarketsCount() external view returns (uint256) {
-        return allMarkets.length;
     }
 
     /**
