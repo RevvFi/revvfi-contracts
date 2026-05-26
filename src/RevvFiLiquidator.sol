@@ -255,7 +255,7 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
             oldAuction.debtAmount
         );
 
-       // IMPORTANT: No token transfer needed - collateral is already in this contract
+        // IMPORTANT: No token transfer needed - collateral is already in this contract
 
         oldAuction.active = false;
 

@@ -55,10 +55,10 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
 
     /// @notice Minimum allowed collateral ratio (110% for safety)
     uint256 public constant MIN_ALLOWED_COLLATERAL_RATIO = 11000;
-    
+
     /// @notice Maximum allowed collateral ratio (500% to prevent over-collateralization abuse)
     uint256 public constant MAX_ALLOWED_COLLATERAL_RATIO = 50000;
-    
+
     /// @notice Minimum allowed liquidation threshold (must be at least 5% below min collateral ratio)
     uint256 public constant MIN_LIQUIDATION_BUFFER = 500; // 5% buffer
 
@@ -94,13 +94,13 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         if (minCollateralRatio > MAX_ALLOWED_COLLATERAL_RATIO) {
             revert RevvFiErrors.CollateralAboveMaximum();
         }
-        
+
         // Liquidation threshold must be at least MIN_LIQUIDATION_BUFFER below minCollateralRatio
         // This prevents nearly unsecured lending (e.g., min=101%, liquidation=100%)
         if (liquidationThreshold >= minCollateralRatio - MIN_LIQUIDATION_BUFFER) {
             revert RevvFiErrors.LiquidationThresholdTooHigh();
         }
-        
+
         // Basic sanity - liquidation threshold must be reasonable (between 1% and 99%)
         if (liquidationThreshold < 100 || liquidationThreshold >= 10000) {
             revert RevvFiErrors.InvalidLiquidationThreshold();
@@ -131,15 +131,15 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
     ) external payable nonReentrant returns (address marketAddress) {
         if (msg.value != deploymentFee) revert RevvFiErrors.InsufficientFee();
         if (!archController.isRegisteredBorrower(borrower)) revert RevvFiErrors.BorrowerNotRegistered();
-        
+
         // Prevent borrowing and collateral being the same asset
         if (borrowAsset == collateralAsset) revert RevvFiErrors.SameAssetNotAllowed();
-        
+
         // Validate assets are not blacklisted
         if (archController.isBlacklistedAsset(borrowAsset)) revert RevvFiErrors.AssetBlacklisted();
         if (archController.isBlacklistedAsset(collateralAsset)) revert RevvFiErrors.AssetBlacklisted();
         if (archController.isBlacklistedAsset(collateralOracle)) revert RevvFiErrors.OracleBlacklisted();
-        
+
         // Validate ratios against protocol guardrails
         _validateRatios(minCollateralRatio, liquidationThreshold);
 

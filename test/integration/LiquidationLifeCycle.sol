@@ -82,8 +82,15 @@ contract LiquidationLifecycleTest is Test {
         vm.stopPrank();
 
         vm.startPrank(liquidatorAddress);
-        usdc.mint(liquidatorAddress, BORROW_AMOUNT);
+        usdc.mint(liquidatorAddress, BORROW_AMOUNT * 2);
         vm.stopPrank();
+    }
+
+    // Helper to trigger interest accrual
+    function _accrueInterest() internal {
+        vm.prank(borrower);
+        vm.expectRevert();
+        market.borrow(0, false, 1200);
     }
 
     function test_LiquidationLifecycle() public {
@@ -112,7 +119,7 @@ contract LiquidationLifecycleTest is Test {
         vm.prank(owner);
         oracle.setPrice(945e8);
 
-        market.triggerAccrueInterest();
+        _accrueInterest();
 
         assertTrue(market.isLiquidatable());
         assertFalse(market.isHealthy());
@@ -198,7 +205,7 @@ contract LiquidationLifecycleTest is Test {
 
         vm.prank(owner);
         oracle.setPrice(945e8);
-        market.triggerAccrueInterest();
+        _accrueInterest();
 
         vm.prank(borrower);
         market.liquidate();
@@ -232,10 +239,15 @@ contract LiquidationLifecycleTest is Test {
         assertGt(market.badDebt(), 0);
         assertGt(market.totalRealizedLoss(), 0);
 
+        // Verify reputation was penalized for default
+        uint256 reputation = reputationRegistry.getReputationScore(borrower);
+        assertLt(reputation, 500);
+
         emit log("=== Partial Bid Liquidation Test Passed ===");
         emit log_named_uint("Total Debt", debtAmount / 1e6);
         emit log_named_uint("Partial Bid", partialBid / 1e6);
         emit log_named_uint("Bad Debt", market.badDebt() / 1e6);
+        emit log_named_uint("Borrower Reputation", reputation);
     }
 
     function test_CannotLiquidateHealthyPosition() public {
@@ -252,5 +264,55 @@ contract LiquidationLifecycleTest is Test {
         vm.prank(borrower);
         vm.expectRevert(abi.encodeWithSignature("InsufficientCollateral()"));
         market.liquidate();
+    }
+
+    function test_DefaultRecordedInReputationRegistry() public {
+        vm.prank(lender);
+        offerBook.submitOffer(BORROW_AMOUNT, APR, 0, 30 days);
+
+        vm.startPrank(borrower);
+        weth.mint(borrower, COLLATERAL_AMOUNT);
+        weth.approve(address(market), COLLATERAL_AMOUNT);
+        market.depositCollateral(COLLATERAL_AMOUNT);
+        market.borrow(BORROW_AMOUNT, false, 1200);
+        vm.stopPrank();
+
+        uint256 reputationBefore = reputationRegistry.getReputationScore(borrower);
+
+        // Force liquidation
+        vm.prank(owner);
+        oracle.setPrice(945e8);
+        _accrueInterest();
+
+        vm.prank(borrower);
+        market.liquidate();
+
+        uint256 auctionId = market.liquidationAuctionId();
+        uint256 debtAmount = market.getTotalOwed();
+
+        vm.prank(liquidatorAddress);
+        usdc.approve(address(liquidator), debtAmount);
+
+        vm.prank(liquidatorAddress);
+        liquidator.placeBid(auctionId, debtAmount);
+
+        vm.warp(block.timestamp + 4 days);
+
+        vm.prank(liquidatorAddress);
+        liquidator.settleAuction(auctionId);
+
+        vm.prank(address(liquidator));
+        market.settleLiquidation(debtAmount, 0);
+
+        uint256 reputationAfter = reputationRegistry.getReputationScore(borrower);
+        assertLt(reputationAfter, reputationBefore);
+
+        IReputationRegistry.BorrowerProfile memory profile = reputationRegistry.getBorrowerProfile(borrower);
+        assertEq(profile.defaultedLoans, 1);
+
+        emit log("=== Default Recording Test Passed ===");
+        emit log_named_uint("Reputation Before", reputationBefore);
+        emit log_named_uint("Reputation After", reputationAfter);
+        emit log_named_uint("Default Count", profile.defaultedLoans);
     }
 }

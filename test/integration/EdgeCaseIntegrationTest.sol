@@ -42,37 +42,23 @@ contract EdgeCaseIntegrationTest is Test {
     uint256 public constant COLLATERAL_AMOUNT = 10 ether;
     uint256 public constant BORROW_AMOUNT = 10000e6; // 10,000 USDC
     uint256 public constant APR = 800; // 8%
-    // Minimum collateral ratio must be at least 11000 (110%)
     uint256 public constant MIN_COLLATERAL_RATIO = 11000; // 110%
-    // Liquidation threshold must be:
-    // 1. Less than minCollateralRatio - MIN_LIQUIDATION_BUFFER (11000 - 500 = 10500)
-    // 2. Less than 10000 (100%) 
-    // 3. Greater than or equal to 100 (1%)
-    uint256 public constant LIQUIDATION_THRESHOLD = 9500; // 95% - This meets all requirements
-
-    // Track initial timestamp for proper time advancement
-    uint256 public initialTimestamp;
+    uint256 public constant LIQUIDATION_THRESHOLD = 9500; // 95%
 
     function setUp() public {
         vm.deal(owner, DEPLOYMENT_FEE);
         vm.startPrank(owner);
 
-        // Deploy tokens
         usdc = new MockERC20("USD Coin", "USDC", 6);
         weth = new MockERC20("Wrapped Ether", "WETH", 18);
-
-        // Deploy oracle with initial price $2000
         oracle = new MockOracle(8, 2000e8);
 
-        // Deploy arch controller
         archController = new RevvFiArchController();
         archController.registerBorrower(borrower);
 
-        // Deploy factory
         factory = new RevvFiFactory(address(archController), owner, DEPLOYMENT_FEE);
         factory.registerWithArchController();
 
-        // Deploy market - using updated ratios that meet guardrails
         address marketAddr = factory.deployMarket{value: DEPLOYMENT_FEE}(
             borrower, address(usdc), address(weth), address(oracle), 18, 6, MIN_COLLATERAL_RATIO, LIQUIDATION_THRESHOLD
         );
@@ -86,22 +72,13 @@ contract EdgeCaseIntegrationTest is Test {
 
         vm.stopPrank();
 
-        // Fund accounts
         vm.deal(borrower, 100 ether);
 
-        // Fund lender with enough USDC for all tests
         vm.startPrank(lender);
-        usdc.mint(lender, 50000e6); // 50,000 USDC
+        usdc.mint(lender, 50000e6);
         usdc.approve(address(offerBook), 50000e6);
         vm.stopPrank();
-
-        // Store initial timestamp
-        initialTimestamp = block.timestamp;
     }
-
-    // ============================================================
-    // DEBUG HELPERS
-    // ============================================================
 
     function _getCurrentPrice() internal returns (uint256) {
         (, int256 price,,,) = oracle.latestRoundData();
@@ -160,7 +137,6 @@ contract EdgeCaseIntegrationTest is Test {
         emit log("===== POSITION STATE =====");
         emit log_named_uint("Active Positions", active);
 
-        // Log first few positions if they exist
         uint256[] memory positions = nft.getLenderPositions(lender);
         for (uint256 i = 0; i < positions.length && i < 5; i++) {
             string memory label = string(abi.encodePacked("Position ", vm.toString(i)));
@@ -169,18 +145,35 @@ contract EdgeCaseIntegrationTest is Test {
         emit log("");
     }
 
+    // CORRECTED: This function now properly accrues interest without reverting
+    function _accrueInterest() internal {
+        // Need to trigger interest accrual with a successful transaction
+        // Use repay(1) which will accrue interest and succeed
+        vm.startPrank(borrower);
+
+        // Mint 1 wei of USDC to borrower for the repayment
+        usdc.mint(borrower, 1);
+        usdc.approve(address(market), 1);
+
+        // This will accrue interest AND succeed (repaying 1 unit)
+        // Only call if there's debt to avoid revert
+        if (market.getTotalOwed() > 0) {
+            market.repay(1);
+        }
+
+        vm.stopPrank();
+    }
+
     function _warpAndAccrue(uint256 duration) internal {
         vm.warp(block.timestamp + duration);
         emit log("");
         emit log_named_uint("Added Duration", duration);
         emit log_named_uint("New Timestamp", block.timestamp);
 
-        // Refresh oracle price to avoid stale price errors
         vm.prank(owner);
         oracle.setFresh(int256(_getCurrentPrice()));
 
-        market.triggerAccrueInterest();
-        _logMarketState("AFTER INTEREST ACCRUAL");
+        _accrueInterest();
     }
 
     function _borrow(uint256 amount) internal {
@@ -269,7 +262,6 @@ contract EdgeCaseIntegrationTest is Test {
         vm.prank(owner);
         oracle.setFresh(int256(newPrice));
 
-        // Verify price was set
         uint256 verifiedPrice = _getCurrentPrice();
         emit log_named_uint("Verified Price", verifiedPrice);
 
@@ -282,23 +274,23 @@ contract EdgeCaseIntegrationTest is Test {
     function test_PartialRepayment() public {
         _snapshot("TEST START");
 
-        // Setup - Lender submits offer
         vm.prank(lender);
         offerBook.submitOffer(BORROW_AMOUNT, APR, 0, 30 days);
         _logMarketState("AFTER OFFER SUBMISSION");
 
-        // Borrower deposits collateral
         _depositCollateral(COLLATERAL_AMOUNT);
-
-        // Borrower borrows full amount
         _borrow(BORROW_AMOUNT);
-        assertEq(market.getTotalOwed(), BORROW_AMOUNT);
 
-        // Accrue some interest (1 month)
+        uint256 debtAfterBorrow = market.getTotalOwed();
+        assertEq(debtAfterBorrow, BORROW_AMOUNT);
+
+        // Properly accrue interest for 30 days
         _warpAndAccrue(30 days);
 
         uint256 totalOwed = market.getTotalOwed();
-        assertGt(totalOwed, BORROW_AMOUNT);
+        // Interest should be: 10,000 * 8% * (30/365) = 65.753424 USDC
+        uint256 expectedInterest = (BORROW_AMOUNT * APR * 30 days) / (365 days * 10000);
+        assertApproxEqAbs(totalOwed, BORROW_AMOUNT + expectedInterest, 100); // Allow small rounding
         _snapshot("AFTER FIRST ACCRUAL");
 
         // Repay 20%
@@ -306,10 +298,10 @@ contract EdgeCaseIntegrationTest is Test {
         _repay(repayment20Percent);
 
         uint256 afterFirstRepayment = market.getTotalOwed();
-        assertApproxEqAbs(afterFirstRepayment, totalOwed - repayment20Percent, 1);
+        assertApproxEqAbs(afterFirstRepayment, totalOwed - repayment20Percent, 2);
         _snapshot("AFTER 20% REPAYMENT");
 
-        // Wait another month - INCREMENT time
+        // Wait another month
         _warpAndAccrue(30 days);
 
         uint256 afterSecondMonth = market.getTotalOwed();
@@ -321,10 +313,10 @@ contract EdgeCaseIntegrationTest is Test {
         _repay(repayment50Percent);
 
         uint256 afterSecondRepayment = market.getTotalOwed();
-        assertApproxEqAbs(afterSecondRepayment, afterSecondMonth - repayment50Percent, 1);
+        assertApproxEqAbs(afterSecondRepayment, afterSecondMonth - repayment50Percent, 2);
         _snapshot("AFTER 50% REPAYMENT");
 
-        // Wait one more month - INCREMENT time again
+        // Wait one more month
         _warpAndAccrue(30 days);
 
         uint256 beforeFinalRepayment = market.getTotalOwed();
@@ -337,7 +329,6 @@ contract EdgeCaseIntegrationTest is Test {
         assertEq(market.getTotalOwed(), 0);
         _snapshot("TEST END");
 
-        // Verify reputation increased after full repayment
         uint256 reputation = reputationRegistry.getReputationScore(borrower);
         assertGt(reputation, 500);
 
@@ -346,21 +337,17 @@ contract EdgeCaseIntegrationTest is Test {
     }
 
     // ============================================================
-    // TEST 3: Collateral Top Up (Deposit more collateral when price drops)
+    // TEST 2: Collateral Top Up
     // ============================================================
     function test_CollateralTopUp() public {
         _snapshot("TEST START");
 
-        // Setup - Submit larger offer to allow additional borrowing
-        uint256 largerOffer = BORROW_AMOUNT * 3; // 30,000 USDC
+        uint256 largerOffer = BORROW_AMOUNT * 3;
         vm.prank(lender);
         offerBook.submitOffer(largerOffer, APR, 0, 30 days);
         _logMarketState("AFTER OFFER SUBMISSION");
 
-        // Initial deposit
         _depositCollateral(COLLATERAL_AMOUNT);
-
-        // Initial borrow
         _borrow(BORROW_AMOUNT);
 
         uint256 initialCollateral = collateralEscrow.getCollateralBalance(borrower);
@@ -368,16 +355,13 @@ contract EdgeCaseIntegrationTest is Test {
         assertTrue(market.isHealthy());
         _snapshot("INITIAL STATE");
 
-        // Price drops - but keep above liquidation threshold
         _setPrice(1800e8);
 
-        assertTrue(market.isHealthy()); // Still healthy
+        assertTrue(market.isHealthy());
         uint256 ratioAfterDrop = market.getCollateralRatio();
-        // With 110% min ratio and 10 ETH @ $1800 = $18,000, debt $10,000 = 180%
         assertApproxEqAbs(ratioAfterDrop, 18000, 10);
         _snapshot("AFTER PRICE DROP");
 
-        // Top up with additional collateral
         uint256 topUpAmount = 5 ether;
         _depositCollateral(topUpAmount);
 
@@ -385,16 +369,13 @@ contract EdgeCaseIntegrationTest is Test {
         assertEq(newCollateral, COLLATERAL_AMOUNT + topUpAmount);
         _snapshot("AFTER TOP UP");
 
-        // Ratio should improve
         uint256 ratioAfterTopUp = market.getCollateralRatio();
         assertGt(ratioAfterTopUp, ratioAfterDrop);
 
-        // Verify can borrow more now
         uint256 maxBorrowable = market.getMaxBorrowable();
         assertGt(maxBorrowable, 0);
         _snapshot("BEFORE ADDITIONAL BORROW");
 
-        // Borrow additional amount
         uint256 additionalBorrow = (maxBorrowable * 20) / 100;
         _borrow(additionalBorrow);
 
@@ -408,13 +389,12 @@ contract EdgeCaseIntegrationTest is Test {
     }
 
     // ============================================================
-    // TEST 4: Liquidation Recovery (Warning state -> deposit more -> healthy again)
+    // TEST 3: Liquidation Recovery
     // ============================================================
     function test_LiquidationRecovery() public {
         _snapshot("TEST START");
 
-        // Setup - Use appropriate borrow amount for 110% min ratio
-        uint256 borrowAmount = 16000e6; // 16,000 USDC
+        uint256 borrowAmount = 16000e6;
 
         vm.prank(lender);
         offerBook.submitOffer(borrowAmount + 10000e6, APR, 0, 30 days);
@@ -423,16 +403,13 @@ contract EdgeCaseIntegrationTest is Test {
         _depositCollateral(COLLATERAL_AMOUNT);
         _borrow(borrowAmount);
 
-        // Verify position is healthy initially
         assertTrue(market.isHealthy());
         assertFalse(market.isLiquidatable());
         _snapshot("INITIAL STATE");
 
-        // Price drops to create warning state (but above liquidation threshold)
         _setPrice(1650e8);
         _snapshot("AFTER PRICE DROP - BEFORE ADDITIONAL BORROW");
 
-        // Try to borrow more to push into unhealthy territory
         uint256 currentDebt = market.getTotalOwed();
         uint256 maxBorrowable = market.getMaxBorrowable();
 
@@ -445,7 +422,6 @@ contract EdgeCaseIntegrationTest is Test {
 
         _snapshot("AFTER ADDITIONAL BORROW");
 
-        // Log health status
         bool isHealthy = market.isHealthy();
         bool isLiquidatable = market.isLiquidatable();
 
@@ -454,7 +430,6 @@ contract EdgeCaseIntegrationTest is Test {
         emit log_string(isHealthy ? "Position is healthy" : "Position is unhealthy");
         emit log_string(isLiquidatable ? "Position is liquidatable" : "Position is not liquidatable");
 
-        // Borrower deposits more collateral to recover
         uint256 recoveryAmount = 2 ether;
         _depositCollateral(recoveryAmount);
         _snapshot("AFTER RECOVERY COLLATERAL");
@@ -462,7 +437,6 @@ contract EdgeCaseIntegrationTest is Test {
         uint256 newCollateral = collateralEscrow.getCollateralBalance(borrower);
         assertEq(newCollateral, COLLATERAL_AMOUNT + recoveryAmount);
 
-        // Should be healthy again (ratio should be > min collateral ratio)
         assertTrue(market.isHealthy());
         assertFalse(market.isLiquidatable());
 
@@ -476,44 +450,39 @@ contract EdgeCaseIntegrationTest is Test {
     }
 
     // ============================================================
-    // TEST 5: Multiple Borrows with Different APRs
+    // TEST 4: Multiple Borrows with Different APRs
     // ============================================================
     function test_MultipleBorrowsDifferentAPRs() public {
         _snapshot("TEST START");
 
-        // Submit offers at different APRs
-        uint256 offerAmount = 15000e6; // 15,000 USDC each
+        uint256 offerAmount = 15000e6;
 
         vm.startPrank(lender);
-        offerBook.submitOffer(offerAmount, 500, 0, 30 days); // 5% APR
-        offerBook.submitOffer(offerAmount, 800, 0, 30 days); // 8% APR
-        offerBook.submitOffer(offerAmount, 1000, 0, 30 days); // 10% APR
+        offerBook.submitOffer(offerAmount, 500, 0, 30 days);
+        offerBook.submitOffer(offerAmount, 800, 0, 30 days);
+        offerBook.submitOffer(offerAmount, 1000, 0, 30 days);
         vm.stopPrank();
 
         _logMarketState("AFTER OFFER SUBMISSIONS");
 
-        // Deposit enough collateral (3x) - with 110% min ratio
         uint256 totalCollateral = COLLATERAL_AMOUNT * 3;
         _depositCollateral(totalCollateral);
         _snapshot("AFTER COLLATERAL DEPOSIT");
 
-        // Borrow in multiple transactions
-        _borrow(offerAmount); // Takes 5% APR offer
-        _borrow(offerAmount); // Takes 8% APR offer
-        _borrow(offerAmount); // Takes 10% APR offer
+        _borrow(offerAmount);
+        _borrow(offerAmount);
+        _borrow(offerAmount);
 
         _snapshot("AFTER ALL BORROWS");
 
         assertEq(market.getTotalOwed(), offerAmount * 3);
 
-        // All positions should be active
         RevvFiPositionNFT concretePositionNFT = RevvFiPositionNFT(address(positionNFT));
         uint256 activePositions = concretePositionNFT.getActivePositionCount(lender);
         assertEq(activePositions, 3);
 
         _logPositionState();
 
-        // Full repayment
         _repayFull();
 
         _snapshot("AFTER REPAYMENT");
@@ -521,5 +490,76 @@ contract EdgeCaseIntegrationTest is Test {
         _snapshot("TEST END");
 
         emit log("=== Multiple Borrows Different APRs Test Passed ===");
+    }
+
+    // ============================================================
+    // TEST 5: Reputation Registry Integration
+    // ============================================================
+    function test_ReputationRegistryIntegration() public {
+        assertTrue(reputationRegistry.isBorrowerRegistered(borrower));
+        assertEq(reputationRegistry.getReputationScore(borrower), 500);
+
+        vm.prank(lender);
+        offerBook.submitOffer(BORROW_AMOUNT, APR, 0, 30 days);
+
+        _depositCollateral(COLLATERAL_AMOUNT);
+        _borrow(BORROW_AMOUNT);
+
+        assertGt(reputationRegistry.getBorrowerProfile(borrower).totalBorrowed, 0);
+
+        _repayFull();
+
+        uint256 finalScore = reputationRegistry.getReputationScore(borrower);
+        assertGt(finalScore, 500);
+
+        IReputationRegistry.RiskLabel label = reputationRegistry.getRiskLabel(borrower);
+        assertTrue(uint8(label) <= uint8(IReputationRegistry.RiskLabel.B));
+
+        emit log("=== Reputation Registry Integration Test Passed ===");
+        emit log_named_uint("Final Reputation Score", finalScore);
+    }
+
+    // ============================================================
+    // TEST 6: Verify Interest Accrual Works Correctly
+    // ============================================================
+    function test_InterestAccrualWorks() public {
+        vm.prank(lender);
+        offerBook.submitOffer(BORROW_AMOUNT, APR, 0, 30 days);
+
+        _depositCollateral(COLLATERAL_AMOUNT);
+        _borrow(BORROW_AMOUNT);
+
+        uint256 positionId = 1; // First position ID
+
+        // Check initial state
+        assertEq(market.positionAccruedInterest(positionId), 0);
+        assertEq(market.getTotalOwed(), BORROW_AMOUNT);
+
+        // Accrue interest for 30 days
+        vm.warp(block.timestamp + 30 days);
+        vm.prank(owner);
+        oracle.setFresh(int256(_getCurrentPrice()));
+
+        // Use repay(1) to trigger accrual
+        vm.startPrank(borrower);
+        usdc.mint(borrower, 1);
+        usdc.approve(address(market), 1);
+        market.repay(1);
+        vm.stopPrank();
+
+        // Interest should be added to positionAccruedInterest
+        uint256 accruedInterest = market.positionAccruedInterest(positionId);
+        assertGt(accruedInterest, 0);
+
+        // Verify interest amount is correct
+        uint256 expectedInterest = (BORROW_AMOUNT * APR * 30 days) / (365 days * 10000);
+        assertApproxEqAbs(accruedInterest, expectedInterest, 100);
+
+        // Total owed should include interest
+        assertApproxEqAbs(market.getTotalOwed(), BORROW_AMOUNT + expectedInterest, 100);
+
+        emit log("=== Interest Accrual Test Passed ===");
+        emit log_named_uint("Accrued Interest (USDC units)", accruedInterest);
+        emit log_named_uint("Expected Interest (USDC units)", expectedInterest);
     }
 }

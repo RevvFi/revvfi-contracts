@@ -60,11 +60,7 @@ contract RevvFiDeploymentScript is Script {
 
         // Step 3: Deploy Factory
         console.log("Deploying RevvFiFactory...");
-        factory = new RevvFiFactory(
-            address(archController),
-            feeRecipient,
-            deploymentFee
-        );
+        factory = new RevvFiFactory(address(archController), feeRecipient, deploymentFee);
         console.log("Factory deployed at:", address(factory));
 
         // Step 4: Register factory with ArchController
@@ -84,14 +80,14 @@ contract RevvFiDeploymentScript is Script {
         console.log("  Liquidation Threshold:", "9500 (95%)");
 
         marketAddress = factory.deployMarket{value: deploymentFee}(
-            owner,              // borrower
-            usdc,              // borrowAsset
-            weth,              // collateralAsset
-            chainlinkEthUsd,   // collateralOracle
-            18,                // collateralDecimals (WETH)
-            6,                 // borrowDecimals (USDC)
-            10000,             // minCollateralRatio (100%)
-            9500               // liquidationThreshold (95%)
+            owner, // borrower
+            usdc, // borrowAsset
+            weth, // collateralAsset
+            chainlinkEthUsd, // collateralOracle
+            18, // collateralDecimals (WETH)
+            6, // borrowDecimals (USDC)
+            10000, // minCollateralRatio (100%)
+            9500 // liquidationThreshold (95%)
         );
         console.log("Market deployed at:", marketAddress);
 
@@ -105,9 +101,21 @@ contract RevvFiDeploymentScript is Script {
         console.log("Market:", marketAddress);
         console.log("");
         console.log("To verify contracts:");
-        console.log(string.concat("forge verify-contract ", vm.toString(address(archController)), " src/RevvFiArchController.sol:RevvFiArchController"));
-        console.log(string.concat("forge verify-contract ", vm.toString(address(factory)), " src/RevvFiFactory.sol:RevvFiFactory"));
-        console.log(string.concat("forge verify-contract ", vm.toString(marketAddress), " src/RevvFiMarket.sol:RevvFiMarket"));
+        console.log(
+            string.concat(
+                "forge verify-contract ",
+                vm.toString(address(archController)),
+                " src/RevvFiArchController.sol:RevvFiArchController"
+            )
+        );
+        console.log(
+            string.concat(
+                "forge verify-contract ", vm.toString(address(factory)), " src/RevvFiFactory.sol:RevvFiFactory"
+            )
+        );
+        console.log(
+            string.concat("forge verify-contract ", vm.toString(marketAddress), " src/RevvFiMarket.sol:RevvFiMarket")
+        );
         console.log("");
         console.log("Next steps:");
         console.log("1. Transfer ownership of ArchController to a multisig");

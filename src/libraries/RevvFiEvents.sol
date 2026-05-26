@@ -16,7 +16,7 @@ library RevvFiEvents {
     event AssetPermitted(address asset);
     event ControllerAdded(address indexed controllerFactory, address controller);
     event ControllerRemoved(address controller);
-    
+
     // Asset Approval Events
     event BorrowAssetApproved(address indexed asset);
     event BorrowAssetRevoked(address indexed asset);
