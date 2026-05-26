@@ -32,6 +32,7 @@ library RevvFiErrors {
     error BorrowAssetNotApproved();
     error CollateralAssetNotApproved();
     error OracleNotApproved();
+    error SameAssetNotAllowed();
 
     // ========================================================================== //
     //                         CollateralEscrow Errors                           //

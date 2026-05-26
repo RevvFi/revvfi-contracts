@@ -30,25 +30,7 @@ contract RevvFiArchController is Ownable {
     /// @dev Assets that are prohibited from use in the protocol
     EnumerableSet.AddressSet internal _assetBlacklist;
 
-    // ============================================================
-    //              Approved Assets & Oracles (Optional)
-    // ============================================================
-
-    /// @dev Optional: Approved borrow assets (if empty, all are allowed except blacklist)
-    mapping(address => bool) public approvedBorrowAssets;
-    
-    /// @dev Optional: Approved collateral assets (if empty, all are allowed except blacklist)
-    mapping(address => bool) public approvedCollateralAssets;
-    
-    /// @dev Optional: Approved oracles (if empty, all are allowed except blacklist)
-    mapping(address => bool) public approvedOracles;
-    
-    /// @dev Whether to enforce approval lists (owner can toggle)
-    bool public enforceAssetApprovals;
-
-    constructor() Ownable(msg.sender) {
-        enforceAssetApprovals = false; // Start with allowlist disabled for flexibility
-    }
+    constructor() Ownable(msg.sender) {}
 
     // ============================================================
     //                      Borrower Management
@@ -145,7 +127,7 @@ contract RevvFiArchController is Ownable {
      * @param asset Address to check
      * @return True if blacklisted, false otherwise
      */
-    function isBlacklistedAsset(address asset) public view returns (bool) {
+    function isBlacklistedAsset(address asset) external view returns (bool) {
         return _assetBlacklist.contains(asset);
     }
 
@@ -182,118 +164,6 @@ contract RevvFiArchController is Ownable {
      */
     function getBlacklistedAssetsCount() external view returns (uint256) {
         return _assetBlacklist.length();
-    }
-
-    // ============================================================
-    //              Asset & Oracle Approval Management
-    // ============================================================
-
-    /**
-     * @dev Adds an asset to the approved borrow assets list (owner only)
-     * @param asset Address of token to approve as borrow asset
-     */
-    function addApprovedBorrowAsset(address asset) external onlyOwner {
-        if (asset == address(0)) revert RevvFiErrors.ZeroAddressNotAllowed();
-        approvedBorrowAssets[asset] = true;
-        emit RevvFiEvents.BorrowAssetApproved(asset);
-    }
-
-    /**
-     * @dev Removes an asset from the approved borrow assets list (owner only)
-     * @param asset Address of token to remove
-     */
-    function removeApprovedBorrowAsset(address asset) external onlyOwner {
-        approvedBorrowAssets[asset] = false;
-        emit RevvFiEvents.BorrowAssetRevoked(asset);
-    }
-
-    /**
-     * @dev Adds an asset to the approved collateral assets list (owner only)
-     * @param asset Address of token to approve as collateral asset
-     */
-    function addApprovedCollateralAsset(address asset) external onlyOwner {
-        if (asset == address(0)) revert RevvFiErrors.ZeroAddressNotAllowed();
-        approvedCollateralAssets[asset] = true;
-        emit RevvFiEvents.CollateralAssetApproved(asset);
-    }
-
-    /**
-     * @dev Removes an asset from the approved collateral assets list (owner only)
-     * @param asset Address of token to remove
-     */
-    function removeApprovedCollateralAsset(address asset) external onlyOwner {
-        approvedCollateralAssets[asset] = false;
-        emit RevvFiEvents.CollateralAssetRevoked(asset);
-    }
-
-    /**
-     * @dev Adds an oracle to the approved oracles list (owner only)
-     * @param oracle Address of oracle to approve
-     */
-    function addApprovedOracle(address oracle) external onlyOwner {
-        if (oracle == address(0)) revert RevvFiErrors.ZeroAddressNotAllowed();
-        approvedOracles[oracle] = true;
-        emit RevvFiEvents.OracleApproved(oracle);
-    }
-
-    /**
-     * @dev Removes an oracle from the approved oracles list (owner only)
-     * @param oracle Address of oracle to remove
-     */
-    function removeApprovedOracle(address oracle) external onlyOwner {
-        approvedOracles[oracle] = false;
-        emit RevvFiEvents.OracleRevoked(oracle);
-    }
-
-    /**
-     * @dev Enables or disables asset approval enforcement (owner only)
-     * @param enable True to enforce approvals, false to disable
-     */
-    function setEnforceAssetApprovals(bool enable) external onlyOwner {
-        enforceAssetApprovals = enable;
-        emit RevvFiEvents.AssetApprovalEnforcementUpdated(enable);
-    }
-
-    /**
-     * @dev Checks if a borrow asset is allowed for market deployment
-     * @param asset Address of the asset to check
-     * @return True if allowed, false otherwise
-     */
-    function isAllowedBorrowAsset(address asset) external view returns (bool) {
-        if (isBlacklistedAsset(asset)) return false;
-        if (!enforceAssetApprovals) return true;
-        return approvedBorrowAssets[asset];
-    }
-
-    /**
-     * @dev Checks if a collateral asset is allowed for market deployment
-     * @param asset Address of the asset to check
-     * @return True if allowed, false otherwise
-     */
-    function isAllowedCollateralAsset(address asset) external view returns (bool) {
-        if (isBlacklistedAsset(asset)) return false;
-        if (!enforceAssetApprovals) return true;
-        return approvedCollateralAssets[asset];
-    }
-
-    /**
-     * @dev Checks if an oracle is allowed for market deployment
-     * @param oracle Address of the oracle to check
-     * @return True if allowed, false otherwise
-     */
-    function isAllowedOracle(address oracle) external view returns (bool) {
-        if (isBlacklistedAsset(oracle)) return false;
-        if (!enforceAssetApprovals) return true;
-        return approvedOracles[oracle];
-    }
-
-    /**
-     * @dev Checks if an oracle is blacklisted
-     * @param oracle Address of oracle to check
-     * @return True if blacklisted, false otherwise
-     */
-    function isOracleBlacklisted(address oracle) external view returns (bool) {
-        return _assetBlacklist.contains(oracle);
     }
 
     // ============================================================
@@ -478,7 +348,7 @@ contract RevvFiArchController is Ownable {
     }
 
     /**
-     * @dev Returns all registered markets
+     * @dev Returns all registered markets (use paginated version for large lists)
      * @return Array of market addresses
      */
     function getRegisteredMarkets() external view returns (address[] memory) {
