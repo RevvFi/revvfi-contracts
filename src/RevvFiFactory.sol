@@ -52,6 +52,19 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
     /// @dev Required waiting period for arch controller updates
     uint256 public constant TIMELOCK_DURATION = 2 days;
 
+    // ============================================================
+    //                    Protocol Guardrails
+    // ============================================================
+
+    /// @notice Minimum allowed collateral ratio (110% for safety)
+    uint256 public constant MIN_ALLOWED_COLLATERAL_RATIO = 11000;
+    
+    /// @notice Maximum allowed collateral ratio (500% to prevent over-collateralization abuse)
+    uint256 public constant MAX_ALLOWED_COLLATERAL_RATIO = 50000;
+    
+    /// @notice Minimum allowed liquidation threshold (must be at least 5% below min collateral ratio)
+    uint256 public constant MIN_LIQUIDATION_BUFFER = 500; // 5% buffer
+
     /**
      * @dev Sets up factory with arch controller and fee configuration
      * @param _archController Address of the arch controller contract
@@ -69,6 +82,32 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         positionNFT = new RevvFiPositionNFT(address(this));
         liquidator = new RevvFiLiquidator(address(this));
         reputationRegistry = new ReputationRegistry(address(this));
+    }
+
+    /**
+     * @dev Validates collateral ratio and liquidation threshold against protocol guardrails
+     * @param minCollateralRatio Minimum collateral ratio being proposed
+     * @param liquidationThreshold Liquidation threshold being proposed
+     */
+    function _validateRatios(uint256 minCollateralRatio, uint256 liquidationThreshold) internal pure {
+        // Check against global bounds
+        if (minCollateralRatio < MIN_ALLOWED_COLLATERAL_RATIO) {
+            revert RevvFiErrors.CollateralBelowMinimum();
+        }
+        if (minCollateralRatio > MAX_ALLOWED_COLLATERAL_RATIO) {
+            revert RevvFiErrors.CollateralAboveMaximum();
+        }
+        
+        // Liquidation threshold must be at least MIN_LIQUIDATION_BUFFER below minCollateralRatio
+        // This prevents nearly unsecured lending (e.g., min=101%, liquidation=100%)
+        if (liquidationThreshold >= minCollateralRatio - MIN_LIQUIDATION_BUFFER) {
+            revert RevvFiErrors.LiquidationThresholdTooHigh();
+        }
+        
+        // Basic sanity - liquidation threshold must be reasonable (between 1% and 99%)
+        if (liquidationThreshold < 100 || liquidationThreshold >= 10000) {
+            revert RevvFiErrors.InvalidLiquidationThreshold();
+        }
     }
 
     /**
@@ -95,6 +134,14 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
     ) external payable nonReentrant returns (address marketAddress) {
         if (msg.value != deploymentFee) revert RevvFiErrors.InsufficientFee();
         if (!archController.isRegisteredBorrower(borrower)) revert RevvFiErrors.BorrowerNotRegistered();
+        
+        // Validate asset approvals through arch controller
+        if (archController.isBlacklistedAsset(borrowAsset)) revert RevvFiErrors.AssetBlacklisted();
+        if (archController.isBlacklistedAsset(collateralAsset)) revert RevvFiErrors.AssetBlacklisted();
+        if (archController.isBlacklistedAsset(collateralOracle)) revert RevvFiErrors.OracleBlacklisted();
+        
+        // Validate ratios against protocol guardrails
+        _validateRatios(minCollateralRatio, liquidationThreshold);
 
         (bool feeSent,) = feeRecipient.call{value: deploymentFee}("");
         if (!feeSent) revert RevvFiErrors.FeeTransferFailed();
@@ -144,11 +191,23 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Returns all deployed markets
-     * @return Array of market addresses
+     * @dev Returns paginated list of deployed markets
+     * @param start Starting index
+     * @param end Ending index (exclusive)
+     * @return Array of market addresses in the specified range
      */
-    function getAllMarkets() external view returns (address[] memory) {
-        return allMarkets;
+    function getMarkets(uint256 start, uint256 end) external view returns (address[] memory) {
+        uint256 len = allMarkets.length;
+        if (start >= end || start >= len) {
+            return new address[](0);
+        }
+        end = end > len ? len : end;
+        uint256 count = end - start;
+        address[] memory result = new address[](count);
+        for (uint256 i = 0; i < count; i++) {
+            result[i] = allMarkets[start + i];
+        }
+        return result;
     }
 
     /**

@@ -13,7 +13,7 @@ library RevvFiErrors {
     error NotInitialized();
 
     // ========================================================================== //
-    //                              ArchController Errors                         //
+    //                           ArchController Errors                           //
     // ========================================================================== //
 
     error NotControllerFactory();
@@ -29,22 +29,28 @@ library RevvFiErrors {
     error AssetNotBlacklisted();
     error MarketDoesNotExist();
     error ZeroAddressNotAllowed();
+    error BorrowAssetNotApproved();
+    error CollateralAssetNotApproved();
+    error OracleNotApproved();
 
     // ========================================================================== //
-    //                           CollateralEscrow Errors                          //
+    //                         CollateralEscrow Errors                           //
     // ========================================================================== //
 
     error InsufficientCollateral();
     error CollateralBelowMinimum();
+    error CollateralAboveMaximum();
     error OracleNotSet();
     error InvalidDecimals();
     error OraclePriceStale();
     error InvalidCollateralRatio();
     error AlreadyLiquidating();
     error CollateralTransferFailed();
+    error LiquidationThresholdTooHigh();
+    error InvalidLiquidationThreshold();
 
     // ========================================================================== //
-    //                              Market Errors                                 //
+    //                             Market Errors                                 //
     // ========================================================================== //
 
     error MarketClosed();
@@ -63,9 +69,11 @@ library RevvFiErrors {
     error EpochNotComplete();
     error WithdrawalTooEarly();
     error TooManyActivePositions();
+    error AssetBlacklisted();
+    error OracleBlacklisted();
 
     // ========================================================================== //
-    //                              OfferBook Errors                              //
+    //                             OfferBook Errors                              //
     // ========================================================================== //
 
     error ZeroApr();
@@ -80,7 +88,7 @@ library RevvFiErrors {
     error MaxIterationsExceeded();
 
     // ========================================================================== //
-    //                           PositionNFT Errors                               //
+    //                           PositionNFT Errors                              //
     // ========================================================================== //
 
     error PositionNotFoundNFT();
@@ -89,7 +97,7 @@ library RevvFiErrors {
     error MarketNotRegistered();
 
     // ========================================================================== //
-    //                           Liquidator Errors                                //
+    //                           Liquidator Errors                               //
     // ========================================================================== //
 
     error AuctionNotFound();
@@ -103,7 +111,7 @@ library RevvFiErrors {
     error AuctionCollateralNotReceived();
 
     // ========================================================================== //
-    //                              Factory Errors                                //
+    //                             Factory Errors                                //
     // ========================================================================== //
 
     error BorrowerNotRegistered();
@@ -113,7 +121,7 @@ library RevvFiErrors {
     error FeeTransferFailed();
 
     // ========================================================================== //
-    //                           Reputation Errors                                //
+    //                           Reputation Errors                               //
     // ========================================================================== //
 
     error BorrowerNotRegisteredForReputation();

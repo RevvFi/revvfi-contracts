@@ -42,8 +42,13 @@ contract EdgeCaseIntegrationTest is Test {
     uint256 public constant COLLATERAL_AMOUNT = 10 ether;
     uint256 public constant BORROW_AMOUNT = 10000e6; // 10,000 USDC
     uint256 public constant APR = 800; // 8%
-    uint256 public constant MIN_COLLATERAL_RATIO = 10000; // 100%
-    uint256 public constant LIQUIDATION_THRESHOLD = 9500; // 95%
+    // Minimum collateral ratio must be at least 11000 (110%)
+    uint256 public constant MIN_COLLATERAL_RATIO = 11000; // 110%
+    // Liquidation threshold must be:
+    // 1. Less than minCollateralRatio - MIN_LIQUIDATION_BUFFER (11000 - 500 = 10500)
+    // 2. Less than 10000 (100%) 
+    // 3. Greater than or equal to 100 (1%)
+    uint256 public constant LIQUIDATION_THRESHOLD = 9500; // 95% - This meets all requirements
 
     // Track initial timestamp for proper time advancement
     uint256 public initialTimestamp;
@@ -67,7 +72,7 @@ contract EdgeCaseIntegrationTest is Test {
         factory = new RevvFiFactory(address(archController), owner, DEPLOYMENT_FEE);
         factory.registerWithArchController();
 
-        // Deploy market
+        // Deploy market - using updated ratios that meet guardrails
         address marketAddr = factory.deployMarket{value: DEPLOYMENT_FEE}(
             borrower, address(usdc), address(weth), address(oracle), 18, 6, MIN_COLLATERAL_RATIO, LIQUIDATION_THRESHOLD
         );
@@ -165,7 +170,6 @@ contract EdgeCaseIntegrationTest is Test {
     }
 
     function _warpAndAccrue(uint256 duration) internal {
-        // CRITICAL FIX: Use skip() instead of warp() to advance time properly
         vm.warp(block.timestamp + duration);
         emit log("");
         emit log_named_uint("Added Duration", duration);
@@ -364,12 +368,13 @@ contract EdgeCaseIntegrationTest is Test {
         assertTrue(market.isHealthy());
         _snapshot("INITIAL STATE");
 
-        // Price drops
+        // Price drops - but keep above liquidation threshold
         _setPrice(1800e8);
 
         assertTrue(market.isHealthy()); // Still healthy
         uint256 ratioAfterDrop = market.getCollateralRatio();
-        assertApproxEqAbs(ratioAfterDrop, 18000, 10); // 180%
+        // With 110% min ratio and 10 ETH @ $1800 = $18,000, debt $10,000 = 180%
+        assertApproxEqAbs(ratioAfterDrop, 18000, 10);
         _snapshot("AFTER PRICE DROP");
 
         // Top up with additional collateral
@@ -408,8 +413,8 @@ contract EdgeCaseIntegrationTest is Test {
     function test_LiquidationRecovery() public {
         _snapshot("TEST START");
 
-        // Setup - Use a safer borrow amount
-        uint256 borrowAmount = 15000e6; // 15,000 USDC (75% LTV initially)
+        // Setup - Use appropriate borrow amount for 110% min ratio
+        uint256 borrowAmount = 16000e6; // 16,000 USDC
 
         vm.prank(lender);
         offerBook.submitOffer(borrowAmount + 10000e6, APR, 0, 30 days);
@@ -423,15 +428,15 @@ contract EdgeCaseIntegrationTest is Test {
         assertFalse(market.isLiquidatable());
         _snapshot("INITIAL STATE");
 
-        // Price drops to create warning state
-        _setPrice(1750e8);
+        // Price drops to create warning state (but above liquidation threshold)
+        _setPrice(1650e8);
         _snapshot("AFTER PRICE DROP - BEFORE ADDITIONAL BORROW");
 
         // Try to borrow more to push into unhealthy territory
         uint256 currentDebt = market.getTotalOwed();
         uint256 maxBorrowable = market.getMaxBorrowable();
 
-        if (maxBorrowable > 0 && currentDebt < 17000e6) {
+        if (maxBorrowable > 0 && currentDebt < 18000e6) {
             uint256 additionalBorrow = 2000e6;
             if (additionalBorrow <= maxBorrowable) {
                 _borrow(additionalBorrow);
@@ -457,12 +462,12 @@ contract EdgeCaseIntegrationTest is Test {
         uint256 newCollateral = collateralEscrow.getCollateralBalance(borrower);
         assertEq(newCollateral, COLLATERAL_AMOUNT + recoveryAmount);
 
-        // Should be healthy again (ratio should be > 100%)
+        // Should be healthy again (ratio should be > min collateral ratio)
         assertTrue(market.isHealthy());
         assertFalse(market.isLiquidatable());
 
         uint256 recoveredRatio = market.getCollateralRatio();
-        assertGt(recoveredRatio, 10000);
+        assertGt(recoveredRatio, MIN_COLLATERAL_RATIO);
 
         _snapshot("TEST END");
 
@@ -487,7 +492,7 @@ contract EdgeCaseIntegrationTest is Test {
 
         _logMarketState("AFTER OFFER SUBMISSIONS");
 
-        // Deposit enough collateral (3x)
+        // Deposit enough collateral (3x) - with 110% min ratio
         uint256 totalCollateral = COLLATERAL_AMOUNT * 3;
         _depositCollateral(totalCollateral);
         _snapshot("AFTER COLLATERAL DEPOSIT");

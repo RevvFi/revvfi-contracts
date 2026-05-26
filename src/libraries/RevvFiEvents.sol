@@ -16,6 +16,15 @@ library RevvFiEvents {
     event AssetPermitted(address asset);
     event ControllerAdded(address indexed controllerFactory, address controller);
     event ControllerRemoved(address controller);
+    
+    // Asset Approval Events
+    event BorrowAssetApproved(address indexed asset);
+    event BorrowAssetRevoked(address indexed asset);
+    event CollateralAssetApproved(address indexed asset);
+    event CollateralAssetRevoked(address indexed asset);
+    event OracleApproved(address indexed oracle);
+    event OracleRevoked(address indexed oracle);
+    event AssetApprovalEnforcementUpdated(bool enabled);
 
     // ========================================================================== //
     //                           CollateralEscrow Events                          //
