@@ -255,9 +255,7 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
             oldAuction.debtAmount
         );
 
-        // Transfer collateral to new auction
-        IERC20 collateralToken = IERC20(oldAuction.collateralAsset);
-        collateralToken.safeTransfer(address(this), oldAuction.collateralAmount);
+       // IMPORTANT: No token transfer needed - collateral is already in this contract
 
         oldAuction.active = false;
 
