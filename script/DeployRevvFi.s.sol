@@ -2,7 +2,6 @@
 pragma solidity 0.8.33;
 
 import "forge-std/Script.sol";
-import "forge-std/console2.sol";
 import "../src/RevvFiArchController.sol";
 import "../src/RevvFiFactory.sol";
 import "../src/RevvFiMarket.sol";
@@ -51,38 +50,38 @@ contract RevvFiDeploymentScript is Script {
         vm.startBroadcast();
 
         // Step 1: Deploy ArchController
-        console2.log("Deploying RevvFiArchController...");
+        console.log("Deploying RevvFiArchController...");
         archController = new RevvFiArchController();
-        console2.log("ArchController deployed at:", address(archController));
+        console.log("ArchController deployed at:", address(archController));
 
         // Step 2: Register the owner as a borrower (owner can create markets)
         archController.registerBorrower(owner);
-        console2.log("Registered owner as borrower");
+        console.log("Registered owner as borrower");
 
         // Step 3: Deploy Factory
-        console2.log("Deploying RevvFiFactory...");
+        console.log("Deploying RevvFiFactory...");
         factory = new RevvFiFactory(
             address(archController),
             feeRecipient,
             deploymentFee
         );
-        console2.log("Factory deployed at:", address(factory));
+        console.log("Factory deployed at:", address(factory));
 
         // Step 4: Register factory with ArchController
-        console2.log("Registering factory with ArchController...");
+        console.log("Registering factory with ArchController...");
         factory.registerWithArchController();
-        console2.log("Factory registered");
+        console.log("Factory registered");
 
         // Step 5: Deploy a market (example: USDC borrow, WETH collateral)
-        console2.log("Deploying market...");
-        console2.log("  Borrower:", owner);
-        console2.log("  Borrow Asset:", usdc);
-        console2.log("  Collateral Asset:", weth);
-        console2.log("  Oracle:", chainlinkEthUsd);
-        console2.log("  Collateral Decimals:", 18);
-        console2.log("  Borrow Decimals:", 6);
-        console2.log("  Min Collateral Ratio:", 10000); // 100%
-        console2.log("  Liquidation Threshold:", 9500); // 95%
+        console.log("Deploying market...");
+        console.log("  Borrower:", owner);
+        console.log("  Borrow Asset:", usdc);
+        console.log("  Collateral Asset:", weth);
+        console.log("  Oracle:", chainlinkEthUsd);
+        console.log("  Collateral Decimals:", "18");
+        console.log("  Borrow Decimals:", "6");
+        console.log("  Min Collateral Ratio:", "10000 (100%)");
+        console.log("  Liquidation Threshold:", "9500 (95%)");
 
         marketAddress = factory.deployMarket{value: deploymentFee}(
             owner,              // borrower
@@ -94,26 +93,26 @@ contract RevvFiDeploymentScript is Script {
             10000,             // minCollateralRatio (100%)
             9500               // liquidationThreshold (95%)
         );
-        console2.log("Market deployed at:", marketAddress);
+        console.log("Market deployed at:", marketAddress);
 
         vm.stopBroadcast();
 
         // Log deployment summary
-        console2.log("");
-        console2.log("========== DEPLOYMENT SUMMARY ==========");
-        console2.log("ArchController:", address(archController));
-        console2.log("Factory:", address(factory));
-        console2.log("Market:", marketAddress);
-        console2.log("");
-        console2.log("To verify contracts:");
-        console2.log("forge verify-contract", address(archController), "src/RevvFiArchController.sol:RevvFiArchController");
-        console2.log("forge verify-contract", address(factory), "src/RevvFiFactory.sol:RevvFiFactory");
-        console2.log("forge verify-contract", marketAddress, "src/RevvFiMarket.sol:RevvFiMarket");
-        console2.log("");
-        console2.log("Next steps:");
-        console2.log("1. Transfer ownership of ArchController to a multisig");
-        console2.log("2. Register additional borrowers with archController.registerBorrower()");
-        console2.log("3. Lenders can submit offers via market.submitOffer()");
-        console2.log("4. Borrower can deposit collateral and borrow funds");
+        console.log("");
+        console.log("========== DEPLOYMENT SUMMARY ==========");
+        console.log("ArchController:", address(archController));
+        console.log("Factory:", address(factory));
+        console.log("Market:", marketAddress);
+        console.log("");
+        console.log("To verify contracts:");
+        console.log(string.concat("forge verify-contract ", vm.toString(address(archController)), " src/RevvFiArchController.sol:RevvFiArchController"));
+        console.log(string.concat("forge verify-contract ", vm.toString(address(factory)), " src/RevvFiFactory.sol:RevvFiFactory"));
+        console.log(string.concat("forge verify-contract ", vm.toString(marketAddress), " src/RevvFiMarket.sol:RevvFiMarket"));
+        console.log("");
+        console.log("Next steps:");
+        console.log("1. Transfer ownership of ArchController to a multisig");
+        console.log("2. Register additional borrowers with archController.registerBorrower()");
+        console.log("3. Lenders can submit offers via market.submitOffer()");
+        console.log("4. Borrower can deposit collateral and borrow funds");
     }
 }
