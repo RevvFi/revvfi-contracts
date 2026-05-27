@@ -20,6 +20,7 @@ interface IRevvFiLiquidator {
         bool collateralTransferred;
     }
 
+    // Core functions
     function createAuction(
         address market,
         address borrower,
@@ -31,8 +32,11 @@ interface IRevvFiLiquidator {
     function placeBid(uint256 auctionId, uint256 bidAmount) external;
     function settleAuction(uint256 auctionId) external;
     function cancelAuction(uint256 auctionId) external;
+    function receiveCollateral(uint256 auctionId) external;
+    function registerMarket(address market) external;
+
+    // View functions
     function getAuction(uint256 auctionId) external view returns (Auction memory);
     function getWinningBid(uint256 auctionId) external view returns (address, uint256, uint256);
-    function receiveCollateral(uint256 auctionId) external;
     function getCurrentPrice(uint256 auctionId) external view returns (uint256);
 }

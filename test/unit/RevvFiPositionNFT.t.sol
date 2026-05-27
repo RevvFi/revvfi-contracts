@@ -109,7 +109,6 @@ contract RevvFiPositionNFTTest is Test {
         assertEq(positions[0], tokenId);
     }
 
-    // FIXED: Properly check string length using bytes()
     function test_TokenURI() public {
         vm.prank(factory);
         positionNFT.registerMarket(market);
@@ -117,17 +116,14 @@ contract RevvFiPositionNFTTest is Test {
         vm.prank(market);
         uint256 tokenId = positionNFT.mintPosition(lender1, market, PRINCIPAL, APR, SENIORITY);
 
-        // With no base URI set
         string memory uri = positionNFT.tokenURI(tokenId);
         assertEq(uri, "");
 
-        // Set base URI
         vm.prank(factory);
         positionNFT.setBaseURI("https://revvfi.com/api/nft");
 
         uri = positionNFT.tokenURI(tokenId);
         assertTrue(bytes(uri).length > 0);
-        // Use string comparison instead of contains
         string memory expected =
             string(abi.encodePacked("https://revvfi.com/api/nft/position/", vm.toString(tokenId), ".json"));
         assertEq(uri, expected);

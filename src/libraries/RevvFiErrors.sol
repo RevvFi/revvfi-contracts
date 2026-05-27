@@ -13,7 +13,7 @@ library RevvFiErrors {
     error NotInitialized();
 
     // ========================================================================== //
-    //                           ArchController Errors                           //
+    //                           ArchController Errors                            //
     // ========================================================================== //
 
     error NotControllerFactory();
@@ -36,7 +36,7 @@ library RevvFiErrors {
     error MarketPaused();
 
     // ========================================================================== //
-    //                         CollateralEscrow Errors                           //
+    //                         CollateralEscrow Errors                            //
     // ========================================================================== //
 
     error InsufficientCollateral();
@@ -52,7 +52,7 @@ library RevvFiErrors {
     error InvalidLiquidationThreshold();
 
     // ========================================================================== //
-    //                             Market Errors                                 //
+    //                              Market Errors                                 //
     // ========================================================================== //
 
     error MarketClosed();
@@ -75,7 +75,7 @@ library RevvFiErrors {
     error OracleBlacklisted();
 
     // ========================================================================== //
-    //                             OfferBook Errors                              //
+    //                             OfferBook Errors                               //
     // ========================================================================== //
 
     error ZeroApr();
@@ -90,7 +90,7 @@ library RevvFiErrors {
     error MaxIterationsExceeded();
 
     // ========================================================================== //
-    //                           PositionNFT Errors                              //
+    //                            PositionNFT Errors                              //
     // ========================================================================== //
 
     error PositionNotFoundNFT();
@@ -99,7 +99,7 @@ library RevvFiErrors {
     error MarketNotRegistered();
 
     // ========================================================================== //
-    //                           Liquidator Errors                               //
+    //                             Liquidator Errors                              //
     // ========================================================================== //
 
     error AuctionNotFound();
@@ -113,7 +113,7 @@ library RevvFiErrors {
     error AuctionCollateralNotReceived();
 
     // ========================================================================== //
-    //                             Factory Errors                                //
+    //                              Factory Errors                                //
     // ========================================================================== //
 
     error BorrowerNotRegistered();
@@ -123,8 +123,16 @@ library RevvFiErrors {
     error FeeTransferFailed();
 
     // ========================================================================== //
-    //                           Reputation Errors                               //
+    //                            Reputation Errors                               //
     // ========================================================================== //
 
     error BorrowerNotRegisteredForReputation();
+
+    // ========================================================================== //
+    //                              Helper Methods                                //
+    // ========================================================================== //
+
+    function revertIfZero(address addr) internal pure {
+        if (addr == address(0)) revert ZeroAddress();
+    }
 }

@@ -25,14 +25,21 @@ interface IRevvFiLiquidityQueue {
         uint256[] requestIds;
     }
 
+    // Initialization function (only callable by factory)
+    function initialize(address _factory, address _market, address _positionNFT) external;
+
+    // Core functions
     function requestWithdrawal(address lender, uint256 positionId, uint256 amount) external returns (uint256);
     function processEpoch(uint256 epochNumber, uint256 availableLiquidity) external;
     function claimWithdrawal(uint256 requestId, uint256 amount) external;
     function cancelWithdrawal(uint256 requestId) external;
+
+    // View functions
     function getCurrentEpoch() external view returns (uint256);
     function getEpoch(uint256 epochNumber) external view returns (Epoch memory);
     function getWithdrawalRequest(uint256 requestId) external view returns (WithdrawalRequest memory);
     function getLenderRequests(address lender) external view returns (uint256[] memory);
+    function getEpochRequests(uint256 epochNumber) external view returns (uint256[] memory);
     function isWithdrawalReady(uint256 requestId) external view returns (bool);
     function timeUntilEpochEnd() external view returns (uint256);
 }

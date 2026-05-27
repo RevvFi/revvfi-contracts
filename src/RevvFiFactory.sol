@@ -3,122 +3,105 @@ pragma solidity 0.8.33;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/proxy/Clones.sol";
 
-import "./RevvFiArchController.sol";
-import "./RevvFiCollateralEscrow.sol";
-import "./RevvFiOfferBook.sol";
-import "./RevvFiPositionNFT.sol";
-import "./RevvFiLiquidator.sol";
-import "./RevvFiMarket.sol";
-import "./RevvFiLiquidityQueue.sol";
-import "./ReputationRegistry.sol";
+import "./interfaces/IRevvFiArchController.sol";
+import "./interfaces/IRevvFiPositionNFT.sol";
+import "./interfaces/IRevvFiLiquidator.sol";
+import "./interfaces/IReputationRegistry.sol";
+import "./interfaces/IRevvFiMarket.sol";
+import "./interfaces/IRevvFiCollateralEscrow.sol";
+import "./interfaces/IRevvFiOfferBook.sol";
+import "./interfaces/IRevvFiLiquidityQueue.sol";
 import "./libraries/RevvFiErrors.sol";
 import "./libraries/RevvFiEvents.sol";
 
-/**
- * @title RevvFiFactory
- * @author Preet Singh
- * @notice Deploys and manages all lending markets and their associated components
- * @dev Creates a complete lending market with escrow, offer book, and liquidity queue
- */
 contract RevvFiFactory is Ownable, ReentrancyGuard {
-    /// @dev Central registry controlling permissions and listings
-    RevvFiArchController public archController;
+    using Clones for address;
 
-    /// @dev NFT contract representing lender positions
-    RevvFiPositionNFT public positionNFT;
+    // Core contracts (mutable - can be set once by owner)
+    IRevvFiArchController public archController;
+    IRevvFiPositionNFT public positionNFT;
+    IRevvFiLiquidator public liquidator;
+    IReputationRegistry public reputationRegistry;
+    bool public coreContractsSet;
 
-    /// @dev Contract that handles liquidations and auctions
-    RevvFiLiquidator public liquidator;
+    // Implementation addresses (immutable)
+    address public immutable marketImpl;
+    address public immutable escrowImpl;
+    address public immutable offerBookImpl;
+    address public immutable liquidityQueueImpl;
 
-    /// @dev Contract that tracks borrower reputation
-    ReputationRegistry public reputationRegistry;
-
-    /// @dev Fee charged for deploying a new market
+    // Configuration
     uint256 public deploymentFee;
-
-    /// @dev Address that receives deployment fees
     address public feeRecipient;
-
-    /// @dev Pending arch controller address for update (timelock protected)
     address public pendingArchController;
-
-    /// @dev Timestamp when arch controller update can be executed
     uint256 public archControllerUpdateTimelock;
 
-    /// @dev Required waiting period for arch controller updates
-    uint256 public constant TIMELOCK_DURATION = 2 days;
+    uint256 private constant TIMELOCK = 2 days;
+    uint256 private constant MIN_CR = 11000;
+    uint256 private constant MAX_CR = 50000;
+    uint256 private constant LIQ_BUFFER = 500;
 
-    // ============================================================
-    //                    Protocol Guardrails
-    // ============================================================
+    event CoreContractsSet(address archController, address positionNFT, address liquidator, address reputationRegistry);
+    event ImplementationsSet(address market, address escrow, address offerBook, address liquidityQueue);
 
-    /// @notice Minimum allowed collateral ratio (110% for safety)
-    uint256 public constant MIN_ALLOWED_COLLATERAL_RATIO = 11000;
+    constructor(
+        address _feeRecipient,
+        uint256 _deploymentFee,
+        address _marketImpl,
+        address _escrowImpl,
+        address _offerBookImpl,
+        address _liquidityQueueImpl
+    ) Ownable(msg.sender) {
+        if (
+            _feeRecipient == address(0) || _marketImpl == address(0) || _escrowImpl == address(0)
+                || _offerBookImpl == address(0) || _liquidityQueueImpl == address(0)
+        ) {
+            revert RevvFiErrors.ZeroAddress();
+        }
 
-    /// @notice Maximum allowed collateral ratio (500% to prevent over-collateralization abuse)
-    uint256 public constant MAX_ALLOWED_COLLATERAL_RATIO = 50000;
-
-    /// @notice Minimum allowed liquidation threshold (must be at least 5% below min collateral ratio)
-    uint256 public constant MIN_LIQUIDATION_BUFFER = 500; // 5% buffer
-
-    /**
-     * @dev Sets up factory with arch controller and fee configuration
-     * @param _archController Address of the arch controller contract
-     * @param _feeRecipient Address that receives deployment fees
-     * @param _deploymentFee Fee charged per market deployment
-     */
-    constructor(address _archController, address _feeRecipient, uint256 _deploymentFee) Ownable(msg.sender) {
-        if (_archController == address(0)) revert RevvFiErrors.ZeroAddress();
-        if (_feeRecipient == address(0)) revert RevvFiErrors.ZeroAddress();
-
-        archController = RevvFiArchController(_archController);
         feeRecipient = _feeRecipient;
         deploymentFee = _deploymentFee;
 
-        positionNFT = new RevvFiPositionNFT(address(this));
-        liquidator = new RevvFiLiquidator(address(this));
-        reputationRegistry = new ReputationRegistry(address(this));
+        marketImpl = _marketImpl;
+        escrowImpl = _escrowImpl;
+        offerBookImpl = _offerBookImpl;
+        liquidityQueueImpl = _liquidityQueueImpl;
+
+        emit ImplementationsSet(marketImpl, escrowImpl, offerBookImpl, liquidityQueueImpl);
     }
 
-    /**
-     * @dev Validates collateral ratio and liquidation threshold against protocol guardrails
-     * @param minCollateralRatio Minimum collateral ratio being proposed
-     * @param liquidationThreshold Liquidation threshold being proposed
-     */
-    function _validateRatios(uint256 minCollateralRatio, uint256 liquidationThreshold) internal pure {
-        // Check against global bounds
-        if (minCollateralRatio < MIN_ALLOWED_COLLATERAL_RATIO) {
-            revert RevvFiErrors.CollateralBelowMinimum();
-        }
-        if (minCollateralRatio > MAX_ALLOWED_COLLATERAL_RATIO) {
-            revert RevvFiErrors.CollateralAboveMaximum();
-        }
-
-        // Liquidation threshold must be at least MIN_LIQUIDATION_BUFFER below minCollateralRatio
-        // This prevents nearly unsecured lending (e.g., min=101%, liquidation=100%)
-        if (liquidationThreshold >= minCollateralRatio - MIN_LIQUIDATION_BUFFER) {
-            revert RevvFiErrors.LiquidationThresholdTooHigh();
+    function setCoreContracts(
+        address _archController,
+        address _positionNFT,
+        address _liquidator,
+        address _reputationRegistry
+    ) external onlyOwner {
+        if (coreContractsSet) revert RevvFiErrors.AlreadyInitialized();
+        if (
+            _archController == address(0) || _positionNFT == address(0) || _liquidator == address(0)
+                || _reputationRegistry == address(0)
+        ) {
+            revert RevvFiErrors.ZeroAddress();
         }
 
-        // Basic sanity - liquidation threshold must be reasonable (between 1% and 99%)
-        if (liquidationThreshold < 100 || liquidationThreshold >= 10000) {
-            revert RevvFiErrors.InvalidLiquidationThreshold();
-        }
+        archController = IRevvFiArchController(_archController);
+        positionNFT = IRevvFiPositionNFT(_positionNFT);
+        liquidator = IRevvFiLiquidator(_liquidator);
+        reputationRegistry = IReputationRegistry(_reputationRegistry);
+        coreContractsSet = true;
+
+        emit CoreContractsSet(_archController, _positionNFT, _liquidator, _reputationRegistry);
     }
 
-    /**
-     * @dev Deploys a complete lending market with all components
-     * @param borrower Address that will control the market
-     * @param borrowAsset Token that lenders will provide
-     * @param collateralAsset Token that borrowers will lock
-     * @param collateralOracle Chainlink oracle for collateral pricing
-     * @param collateralDecimals Decimals of collateral token
-     * @param borrowDecimals Decimals of borrow token
-     * @param minCollateralRatio Minimum required collateral ratio
-     * @param liquidationThreshold Threshold for liquidation
-     * @return marketAddress Address of the newly deployed market
-     */
+    function _validateRatios(uint256 minCR, uint256 liqThreshold) internal pure {
+        if (minCR < MIN_CR) revert RevvFiErrors.CollateralBelowMinimum();
+        if (minCR > MAX_CR) revert RevvFiErrors.CollateralAboveMaximum();
+        if (liqThreshold >= minCR - LIQ_BUFFER) revert RevvFiErrors.LiquidationThresholdTooHigh();
+        if (liqThreshold < 100 || liqThreshold >= 10000) revert RevvFiErrors.InvalidLiquidationThreshold();
+    }
+
     function deployMarket(
         address borrower,
         address borrowAsset,
@@ -129,58 +112,56 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         uint256 minCollateralRatio,
         uint256 liquidationThreshold
     ) external payable nonReentrant returns (address marketAddress) {
+        if (!coreContractsSet) revert RevvFiErrors.UnauthorizedCaller();
         if (msg.value != deploymentFee) revert RevvFiErrors.InsufficientFee();
         if (!archController.isRegisteredBorrower(borrower)) revert RevvFiErrors.BorrowerNotRegistered();
-
-        // Prevent borrowing and collateral being the same asset
         if (borrowAsset == collateralAsset) revert RevvFiErrors.SameAssetNotAllowed();
+        if (
+            archController.isBlacklistedAsset(borrowAsset) || archController.isBlacklistedAsset(collateralAsset)
+                || archController.isBlacklistedAsset(collateralOracle)
+        ) revert RevvFiErrors.AssetBlacklisted();
 
-        // Validate assets are not blacklisted
-        if (archController.isBlacklistedAsset(borrowAsset)) revert RevvFiErrors.AssetBlacklisted();
-        if (archController.isBlacklistedAsset(collateralAsset)) revert RevvFiErrors.AssetBlacklisted();
-        if (archController.isBlacklistedAsset(collateralOracle)) revert RevvFiErrors.OracleBlacklisted();
-
-        // Validate ratios against protocol guardrails
         _validateRatios(minCollateralRatio, liquidationThreshold);
 
         (bool feeSent,) = feeRecipient.call{value: deploymentFee}("");
         if (!feeSent) revert RevvFiErrors.FeeTransferFailed();
 
-        // Register borrower with reputation system
         reputationRegistry.registerBorrower(borrower);
 
-        RevvFiMarket market =
-            new RevvFiMarket(address(this), address(archController), borrower, borrowAsset, collateralAsset);
+        marketAddress = marketImpl.clone();
+        address escrowAddr = escrowImpl.clone();
+        address offerBookAddr = offerBookImpl.clone();
+        address liquidityQueueAddr = liquidityQueueImpl.clone();
 
-        marketAddress = address(market);
+        // Register market in PositionNFT BEFORE initializing market
+        positionNFT.registerMarket(marketAddress);
 
-        // Create and configure collateral escrow
-        RevvFiCollateralEscrow collateralEscrow = new RevvFiCollateralEscrow(address(this));
-        collateralEscrow.initialize(
-            marketAddress, borrower, borrowAsset, collateralAsset, collateralOracle, collateralDecimals, borrowDecimals
-        );
-        collateralEscrow.setMinCollateralRatio(minCollateralRatio);
-        collateralEscrow.setLiquidationThreshold(liquidationThreshold);
+        IRevvFiMarket(marketAddress)
+            .initialize(address(this), address(archController), borrower, borrowAsset, collateralAsset);
 
-        // Create offer book for lending offers
-        RevvFiOfferBook offerBook = new RevvFiOfferBook(address(this));
-        offerBook.initialize(marketAddress, borrowAsset);
+        IRevvFiCollateralEscrow(escrowAddr)
+            .initialize(
+                address(this),
+                marketAddress,
+                borrower,
+                borrowAsset,
+                collateralAsset,
+                collateralOracle,
+                collateralDecimals,
+                borrowDecimals
+            );
+        IRevvFiCollateralEscrow(escrowAddr).setMinCollateralRatio(minCollateralRatio);
+        IRevvFiCollateralEscrow(escrowAddr).setLiquidationThreshold(liquidationThreshold);
 
-        // Create liquidity queue for withdrawal management
-        RevvFiLiquidityQueue liquidityQueue =
-            new RevvFiLiquidityQueue(marketAddress, address(this), address(positionNFT));
+        IRevvFiOfferBook(offerBookAddr).initialize(address(this), marketAddress, borrowAsset);
 
-        // Connect all contracts to the market
-        market.setContracts(
-            address(collateralEscrow),
-            address(offerBook),
-            address(positionNFT),
-            address(liquidator),
-            address(reputationRegistry)
-        );
+        IRevvFiLiquidityQueue(liquidityQueueAddr).initialize(address(this), marketAddress, address(positionNFT));
 
-        // Register market with all necessary systems
-        // ArchController is the SINGLE SOURCE OF TRUTH for all markets
+        IRevvFiMarket(marketAddress)
+            .setContracts(
+                escrowAddr, offerBookAddr, address(positionNFT), address(liquidator), address(reputationRegistry)
+            );
+
         reputationRegistry.registerMarket(marketAddress);
         liquidator.registerMarket(marketAddress);
         archController.registerMarket(marketAddress);
@@ -190,62 +171,41 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
         );
     }
 
-    /**
-     * @dev Registers the factory with the arch controller (owner only)
-     */
     function registerWithArchController() external onlyOwner {
+        if (!coreContractsSet) revert RevvFiErrors.UnauthorizedCaller();
         archController.registerControllerFactory(address(this));
         archController.registerController(address(this));
     }
 
-    /**
-     * @dev Updates deployment fee (owner only)
-     * @param newFee New fee amount in ETH
-     */
     function setDeploymentFee(uint256 newFee) external onlyOwner {
         emit RevvFiEvents.FeeUpdated(deploymentFee, newFee);
         deploymentFee = newFee;
     }
 
-    /**
-     * @dev Updates fee recipient address (owner only)
-     * @param newRecipient New fee recipient address
-     */
     function setFeeRecipient(address newRecipient) external onlyOwner {
         if (newRecipient == address(0)) revert RevvFiErrors.ZeroAddress();
         feeRecipient = newRecipient;
     }
 
-    /**
-     * @dev Requests an arch controller update with timelock (owner only)
-     * @param newArchController Address of new arch controller
-     */
     function requestArchControllerUpdate(address newArchController) external onlyOwner {
         if (newArchController == address(0)) revert RevvFiErrors.ZeroAddress();
         pendingArchController = newArchController;
-        archControllerUpdateTimelock = block.timestamp + TIMELOCK_DURATION;
+        archControllerUpdateTimelock = block.timestamp + TIMELOCK;
         emit RevvFiEvents.ArchControllerUpdateRequested(newArchController);
     }
 
-    /**
-     * @dev Executes pending arch controller update after timelock (owner only)
-     */
     function executeArchControllerUpdate() external onlyOwner {
         if (pendingArchController == address(0)) revert RevvFiErrors.PendingArchControllerNotSet();
         if (block.timestamp < archControllerUpdateTimelock) revert RevvFiErrors.UnauthorizedCaller();
 
-        address oldArchController = address(archController);
-        archController = RevvFiArchController(pendingArchController);
-
+        address oldArch = address(archController);
+        archController = IRevvFiArchController(pendingArchController);
         pendingArchController = address(0);
         archControllerUpdateTimelock = 0;
 
-        emit RevvFiEvents.ArchControllerUpdated(oldArchController, address(archController));
+        emit RevvFiEvents.ArchControllerUpdated(oldArch, address(archController));
     }
 
-    /**
-     * @dev Cancels pending arch controller update (owner only)
-     */
     function cancelArchControllerUpdate() external onlyOwner {
         pendingArchController = address(0);
         archControllerUpdateTimelock = 0;

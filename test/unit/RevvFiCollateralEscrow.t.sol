@@ -2,13 +2,18 @@
 pragma solidity 0.8.33;
 
 import "forge-std/Test.sol";
+import "@openzeppelin/contracts/proxy/Clones.sol";
 import "../../src/RevvFiCollateralEscrow.sol";
+import "../../src/interfaces/IRevvFiCollateralEscrow.sol";
 import "../../src/libraries/RevvFiErrors.sol";
 import "../mocks/MockERC20.sol";
 import "../mocks/MockOracle.sol";
 
 contract RevvFiCollateralEscrowTest is Test {
+    using Clones for address;
+
     RevvFiCollateralEscrow public escrow;
+    RevvFiCollateralEscrow public implementation;
     MockERC20 public collateralToken;
     MockERC20 public borrowToken;
     MockOracle public oracle;
@@ -19,7 +24,7 @@ contract RevvFiCollateralEscrowTest is Test {
     address public liquidator = address(0x4);
 
     uint256 public constant BASIS_POINTS = 10000;
-    uint256 public constant INITIAL_PRICE = 2000e8; // ETH at $2000 with 8 decimals
+    uint256 public constant INITIAL_PRICE = 2000e8;
 
     function setUp() public {
         vm.startPrank(factory);
@@ -28,15 +33,15 @@ contract RevvFiCollateralEscrowTest is Test {
         borrowToken = new MockERC20("USD Coin", "USDC", 6);
         oracle = new MockOracle(8, int256(INITIAL_PRICE));
 
-        escrow = new RevvFiCollateralEscrow(factory);
+        // Deploy implementation contract (this will have _disableInitializers)
+        implementation = new RevvFiCollateralEscrow();
+
+        // Clone the implementation to get a fresh instance that can be initialized
+        escrow = RevvFiCollateralEscrow(address(implementation).clone());
+
+        // Initialize the clone
         escrow.initialize(
-            market,
-            borrower,
-            address(borrowToken),
-            address(collateralToken),
-            address(oracle),
-            18, // collateral decimals
-            6 // borrow decimals
+            factory, market, borrower, address(borrowToken), address(collateralToken), address(oracle), 18, 6
         );
 
         vm.stopPrank();
@@ -44,16 +49,13 @@ contract RevvFiCollateralEscrowTest is Test {
         // Set up borrower with tokens and approve the MARKET (not the escrow directly)
         vm.startPrank(borrower);
         collateralToken.mint(borrower, 10 ether);
-        collateralToken.approve(market, 10 ether); // Approve the market, not the escrow
+        collateralToken.approve(market, 10 ether);
         vm.stopPrank();
 
         // Simulate what the market would do: transfer from borrower to market, then call escrow
         vm.startPrank(market);
-        // Market transfers tokens from borrower to itself
         collateralToken.transferFrom(borrower, market, 10 ether);
-        // Market approves escrow to spend its tokens
         collateralToken.approve(address(escrow), 10 ether);
-        // Market calls escrow to deposit collateral (transfers from market to escrow)
         escrow.depositCollateral(borrower, 10 ether);
         vm.stopPrank();
     }
@@ -66,17 +68,14 @@ contract RevvFiCollateralEscrowTest is Test {
     }
 
     function test_DepositCollateral() public {
-        // Create a new borrower for this test
         address newBorrower = address(0x100);
         uint256 amount = 5 ether;
 
-        // Set up new borrower
         vm.startPrank(newBorrower);
         collateralToken.mint(newBorrower, amount);
         collateralToken.approve(market, amount);
         vm.stopPrank();
 
-        // Simulate market deposit
         vm.startPrank(market);
         collateralToken.transferFrom(newBorrower, market, amount);
         collateralToken.approve(address(escrow), amount);
@@ -96,7 +95,6 @@ contract RevvFiCollateralEscrowTest is Test {
     function test_WithdrawCollateral() public {
         uint256 withdrawAmount = 5 ether;
 
-        // Withdraw (debt = 0 so no ratio check)
         vm.prank(market);
         escrow.withdrawCollateral(borrower, withdrawAmount, 0);
 
@@ -111,68 +109,56 @@ contract RevvFiCollateralEscrowTest is Test {
     }
 
     function test_GetCollateralRatio() public view {
-        uint256 debt = 10000e6; // 10,000 USDC
-
-        // 10 ETH @ $2000 = $20,000 vs $10,000 debt = 200%
+        uint256 debt = 10000e6;
         uint256 ratio = escrow.getCollateralRatio(borrower, debt);
-        assertEq(ratio, 20000); // 200% in basis points
+        assertEq(ratio, 20000);
     }
 
     function test_IsHealthy() public view {
-        uint256 debt = 10000e6; // 10,000 USDC
+        uint256 debt = 10000e6;
         assertTrue(escrow.isHealthy(borrower, debt));
     }
 
     function test_IsLiquidatable() public view {
-        // Need ratio < 95% (9500 basis points)
-        // 10 ETH @ $2000 = $20,000
-        // To get ratio < 95%, debt must be > $20,000 / 0.95 = $21,052.63
-        uint256 debt = 21100e6; // 21,100 USDC - this gives ratio ~94.8%
+        uint256 debt = 21100e6;
         assertTrue(escrow.isLiquidatable(borrower, debt));
 
-        // Test non-liquidatable case
-        uint256 safeDebt = 20000e6; // 20,000 USDC - ratio = 100%
+        uint256 safeDebt = 20000e6;
         assertFalse(escrow.isLiquidatable(borrower, safeDebt));
     }
 
     function test_GetHealthStatus() public view {
-        // Healthy: ratio >= 100% (minCollateralRatio = 10000)
         assertEq(
-            uint256(escrow.getHealthStatus(borrower, 10000e6)), uint256(RevvFiCollateralEscrow.HealthStatus.HEALTHY)
+            uint256(escrow.getHealthStatus(borrower, 10000e6)), uint256(IRevvFiCollateralEscrow.HealthStatus.HEALTHY)
         );
 
-        // Warning: 95% <= ratio < 100%
         assertEq(
-            uint256(escrow.getHealthStatus(borrower, 20500e6)), uint256(RevvFiCollateralEscrow.HealthStatus.WARNING)
+            uint256(escrow.getHealthStatus(borrower, 20500e6)), uint256(IRevvFiCollateralEscrow.HealthStatus.WARNING)
         );
 
-        // Liquidatable: ratio < 95%
         assertEq(
             uint256(escrow.getHealthStatus(borrower, 21100e6)),
-            uint256(RevvFiCollateralEscrow.HealthStatus.LIQUIDATABLE)
+            uint256(IRevvFiCollateralEscrow.HealthStatus.LIQUIDATABLE)
         );
     }
 
     function test_GetMaxBorrowable() public view {
-        // 10 ETH @ $2000 = $20,000 / 100% = 20,000 USDC max borrowable
         uint256 maxBorrowable = escrow.getMaxBorrowable(borrower);
         assertApproxEqAbs(maxBorrowable, 20000e6, 1e3);
     }
 
     function test_OraclePriceStale() public {
-        // Create a fresh oracle for this test
         MockOracle freshOracle = new MockOracle(8, int256(INITIAL_PRICE));
 
-        // Create a fresh escrow instance
-        RevvFiCollateralEscrow freshEscrow = new RevvFiCollateralEscrow(factory);
+        // Create a fresh clone
+        RevvFiCollateralEscrow freshEscrow = RevvFiCollateralEscrow(address(implementation).clone());
 
         vm.startPrank(factory);
         freshEscrow.initialize(
-            market, borrower, address(borrowToken), address(collateralToken), address(freshOracle), 18, 6
+            factory, market, borrower, address(borrowToken), address(collateralToken), address(freshOracle), 18, 6
         );
         vm.stopPrank();
 
-        // Deposit collateral using the market flow
         vm.startPrank(borrower);
         collateralToken.mint(borrower, 10 ether);
         collateralToken.approve(market, 10 ether);
@@ -184,11 +170,9 @@ contract RevvFiCollateralEscrowTest is Test {
         freshEscrow.depositCollateral(borrower, 10 ether);
         vm.stopPrank();
 
-        // Make oracle report stale price
         vm.prank(factory);
         freshOracle.setStale();
 
-        // Should revert with OraclePriceStale
         vm.prank(market);
         vm.expectRevert(RevvFiErrors.OraclePriceStale.selector);
         freshEscrow.isHealthy(borrower, 10000e6);
@@ -196,13 +180,9 @@ contract RevvFiCollateralEscrowTest is Test {
 
     function test_SetMinCollateralRatio() public {
         uint256 newRatio = 12000;
-
         vm.prank(factory);
         escrow.setMinCollateralRatio(newRatio);
-
         assertEq(escrow.minCollateralRatio(), newRatio);
-
-        // Reset for other tests (though each test gets fresh state)
     }
 
     function test_CannotSetInvalidMinCollateralRatio() public {
@@ -214,7 +194,6 @@ contract RevvFiCollateralEscrowTest is Test {
     function test_StartLiquidation() public {
         vm.prank(market);
         escrow.startLiquidation();
-
         assertTrue(escrow.isLiquidationActive());
     }
 
@@ -223,7 +202,7 @@ contract RevvFiCollateralEscrowTest is Test {
         escrow.startLiquidation();
         vm.prank(market);
         escrow.endLiquidation();
-
         assertFalse(escrow.isLiquidationActive());
     }
 }
+

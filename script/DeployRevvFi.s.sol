@@ -5,122 +5,103 @@ import "forge-std/Script.sol";
 import "../src/RevvFiArchController.sol";
 import "../src/RevvFiFactory.sol";
 import "../src/RevvFiMarket.sol";
-import "../src/RevvFiOfferBook.sol";
-import "../src/RevvFiPositionNFT.sol";
 import "../src/RevvFiCollateralEscrow.sol";
-import "../src/RevvFiLiquidator.sol";
+import "../src/RevvFiOfferBook.sol";
 import "../src/RevvFiLiquidityQueue.sol";
+import "../src/RevvFiPositionNFT.sol";
+import "../src/RevvFiLiquidator.sol";
 import "../src/ReputationRegistry.sol";
+import "../test/mocks/MockERC20.sol";
+import "../test/mocks/MockOracle.sol";
 
-/**
- * @title RevvFiDeploymentScript
- * @author Preet Singh
- * @notice Deploys the complete RevvFi protocol
- * @dev Run with: forge script script/RevvFiDeployment.s.sol --rpc-url $RPC_URL --private-key $PRIVATE_KEY --broadcast
- */
-contract RevvFiDeploymentScript is Script {
-    // Configuration from environment variables
-    address public owner;
-    address public feeRecipient;
-    uint256 public deploymentFee;
-
-    // Token addresses (to be configured per network)
-    address public usdc;
-    address public weth;
-    address public chainlinkEthUsd;
-
-    // Deployed contract addresses
+contract DeployLocal is Script {
     RevvFiArchController public archController;
     RevvFiFactory public factory;
-    address public marketAddress;
+    RevvFiMarket public market;
+    RevvFiPositionNFT public positionNFT;
+    RevvFiLiquidator public liquidator;
+    ReputationRegistry public reputationRegistry;
+
+    MockERC20 public usdc;
+    MockERC20 public weth;
+    MockOracle public oracle;
+
+    address public owner;
+    address public borrower;
+    address public lender1;
+    address public lender2;
+
+    uint256 public constant DEPLOYMENT_FEE = 0.1 ether;
+    uint256 public constant MIN_COLLATERAL_RATIO = 11000;
+    uint256 public constant LIQUIDATION_THRESHOLD = 9500;
 
     function setUp() public {
-        // Load environment variables
         owner = vm.envAddress("OWNER");
-        feeRecipient = vm.envAddress("FEE_RECIPIENT");
-        deploymentFee = vm.envUint("DEPLOYMENT_FEE");
-
-        // Token addresses - set these in your .env file
-        usdc = vm.envAddress("USDC");
-        weth = vm.envAddress("WETH");
-        chainlinkEthUsd = vm.envAddress("CHAINLINK_ETH_USD");
+        borrower = vm.envAddress("BORROWER");
+        lender1 = vm.envAddress("LENDER1");
+        lender2 = vm.envAddress("LENDER2");
     }
 
     function run() public {
         vm.startBroadcast();
 
-        // Step 1: Deploy ArchController
-        console.log("Deploying RevvFiArchController...");
-        archController = new RevvFiArchController();
-        console.log("ArchController deployed at:", address(archController));
+        // STEP 1: Deploy mock tokens and oracle
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+        weth = new MockERC20("Wrapped Ether", "WETH", 18);
+        oracle = new MockOracle(8, 2000e8);
 
-        // Step 2: Register the owner as a borrower (owner can create markets)
-        archController.registerBorrower(owner);
-        console.log("Registered owner as borrower");
+        // STEP 2: Deploy implementation contracts (for cloning)
+        address marketImpl = address(new RevvFiMarket());
+        address escrowImpl = address(new RevvFiCollateralEscrow());
+        address offerBookImpl = address(new RevvFiOfferBook());
+        address liquidityQueueImpl = address(new RevvFiLiquidityQueue());
 
-        // Step 3: Deploy Factory
-        console.log("Deploying RevvFiFactory...");
-        factory = new RevvFiFactory(address(archController), feeRecipient, deploymentFee);
-        console.log("Factory deployed at:", address(factory));
-
-        // Step 4: Register factory with ArchController
-        console.log("Registering factory with ArchController...");
-        factory.registerWithArchController();
-        console.log("Factory registered");
-
-        // Step 5: Deploy a market (example: USDC borrow, WETH collateral)
-        console.log("Deploying market...");
-        console.log("  Borrower:", owner);
-        console.log("  Borrow Asset:", usdc);
-        console.log("  Collateral Asset:", weth);
-        console.log("  Oracle:", chainlinkEthUsd);
-        console.log("  Collateral Decimals:", "18");
-        console.log("  Borrow Decimals:", "6");
-        console.log("  Min Collateral Ratio:", "10000 (100%)");
-        console.log("  Liquidation Threshold:", "9500 (95%)");
-
-        marketAddress = factory.deployMarket{value: deploymentFee}(
-            owner, // borrower
-            usdc, // borrowAsset
-            weth, // collateralAsset
-            chainlinkEthUsd, // collateralOracle
-            18, // collateralDecimals (WETH)
-            6, // borrowDecimals (USDC)
-            10000, // minCollateralRatio (100%)
-            9500 // liquidationThreshold (95%)
+        // STEP 3: Deploy Factory (without core contracts)
+        factory = new RevvFiFactory(
+            owner, // feeRecipient
+            DEPLOYMENT_FEE, // deploymentFee
+            marketImpl, // marketImpl
+            escrowImpl, // escrowImpl
+            offerBookImpl, // offerBookImpl
+            liquidityQueueImpl // liquidityQueueImpl
         );
-        console.log("Market deployed at:", marketAddress);
+
+        // STEP 4: Deploy ArchController (needs factory for registration later, but not in constructor)
+        archController = new RevvFiArchController();
+        archController.registerBorrower(borrower);
+
+        // STEP 5: Deploy core contracts with factory address
+        positionNFT = new RevvFiPositionNFT(address(factory));
+        liquidator = new RevvFiLiquidator(address(factory));
+        reputationRegistry = new ReputationRegistry(address(factory));
+
+        // STEP 6: Set core contracts in Factory (onlyOwner)
+        factory.setCoreContracts(
+            address(archController), address(positionNFT), address(liquidator), address(reputationRegistry)
+        );
+
+        // STEP 7: Register factory with ArchController
+        factory.registerWithArchController();
+
+        // STEP 8: Deploy Market
+        address marketAddress = factory.deployMarket{value: DEPLOYMENT_FEE}(
+            borrower, address(usdc), address(weth), address(oracle), 18, 6, MIN_COLLATERAL_RATIO, LIQUIDATION_THRESHOLD
+        );
+        market = RevvFiMarket(marketAddress);
 
         vm.stopBroadcast();
 
-        // Log deployment summary
-        console.log("");
-        console.log("========== DEPLOYMENT SUMMARY ==========");
-        console.log("ArchController:", address(archController));
-        console.log("Factory:", address(factory));
-        console.log("Market:", marketAddress);
-        console.log("");
-        console.log("To verify contracts:");
-        console.log(
-            string.concat(
-                "forge verify-contract ",
-                vm.toString(address(archController)),
-                " src/RevvFiArchController.sol:RevvFiArchController"
-            )
-        );
-        console.log(
-            string.concat(
-                "forge verify-contract ", vm.toString(address(factory)), " src/RevvFiFactory.sol:RevvFiFactory"
-            )
-        );
-        console.log(
-            string.concat("forge verify-contract ", vm.toString(marketAddress), " src/RevvFiMarket.sol:RevvFiMarket")
-        );
-        console.log("");
-        console.log("Next steps:");
-        console.log("1. Transfer ownership of ArchController to a multisig");
-        console.log("2. Register additional borrowers with archController.registerBorrower()");
-        console.log("3. Lenders can submit offers via market.submitOffer()");
-        console.log("4. Borrower can deposit collateral and borrow funds");
+        // Deployment Summary
+        console.log("\n========================================");
+        console.log("     DEPLOYMENT SUMMARY");
+        console.log("========================================");
+        console.log(string(abi.encodePacked("ArchController: ", vm.toString(address(archController)))));
+        console.log(string(abi.encodePacked("Factory: ", vm.toString(address(factory)))));
+        console.log(string(abi.encodePacked("PositionNFT: ", vm.toString(address(positionNFT)))));
+        console.log(string(abi.encodePacked("Liquidator: ", vm.toString(address(liquidator)))));
+        console.log(string(abi.encodePacked("ReputationRegistry: ", vm.toString(address(reputationRegistry)))));
+        console.log(string(abi.encodePacked("Market: ", vm.toString(marketAddress))));
+        console.log("========================================");
     }
 }
+

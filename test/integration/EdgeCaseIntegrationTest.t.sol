@@ -40,25 +40,54 @@ contract EdgeCaseIntegrationTest is Test {
 
     uint256 public constant DEPLOYMENT_FEE = 0.1 ether;
     uint256 public constant COLLATERAL_AMOUNT = 10 ether;
-    uint256 public constant BORROW_AMOUNT = 10000e6; // 10,000 USDC
-    uint256 public constant APR = 800; // 8%
-    uint256 public constant MIN_COLLATERAL_RATIO = 11000; // 110%
-    uint256 public constant LIQUIDATION_THRESHOLD = 9500; // 95%
+    uint256 public constant BORROW_AMOUNT = 10000e6;
+    uint256 public constant APR = 800;
+    uint256 public constant MIN_COLLATERAL_RATIO = 11000;
+    uint256 public constant LIQUIDATION_THRESHOLD = 9500;
 
     function setUp() public {
         vm.deal(owner, DEPLOYMENT_FEE);
         vm.startPrank(owner);
 
+        // Deploy tokens and oracle
         usdc = new MockERC20("USD Coin", "USDC", 6);
         weth = new MockERC20("Wrapped Ether", "WETH", 18);
         oracle = new MockOracle(8, 2000e8);
 
+        // Deploy implementation contracts (for cloning)
+        address marketImpl = address(new RevvFiMarket());
+        address escrowImpl = address(new RevvFiCollateralEscrow());
+        address offerBookImpl = address(new RevvFiOfferBook());
+        address liquidityQueueImpl = address(new RevvFiLiquidityQueue());
+
+        // Deploy Factory FIRST (without core contracts)
+        factory = new RevvFiFactory(
+            owner, // feeRecipient
+            DEPLOYMENT_FEE, // deploymentFee
+            marketImpl, // marketImpl
+            escrowImpl, // escrowImpl
+            offerBookImpl, // offerBookImpl
+            liquidityQueueImpl // liquidityQueueImpl
+        );
+
+        // Deploy ArchController
         archController = new RevvFiArchController();
         archController.registerBorrower(borrower);
 
-        factory = new RevvFiFactory(address(archController), owner, DEPLOYMENT_FEE);
+        // Deploy core contracts with factory address (no setFactory needed - they take factory in constructor)
+        positionNFT = IRevvFiPositionNFT(address(new RevvFiPositionNFT(address(factory))));
+        liquidator = IRevvFiLiquidator(address(new RevvFiLiquidator(address(factory))));
+        reputationRegistry = IReputationRegistry(address(new ReputationRegistry(address(factory))));
+
+        // Set core contracts in Factory (onlyOwner)
+        factory.setCoreContracts(
+            address(archController), address(positionNFT), address(liquidator), address(reputationRegistry)
+        );
+
+        // Register factory with ArchController
         factory.registerWithArchController();
 
+        // Deploy market
         address marketAddr = factory.deployMarket{value: DEPLOYMENT_FEE}(
             borrower, address(usdc), address(weth), address(oracle), 18, 6, MIN_COLLATERAL_RATIO, LIQUIDATION_THRESHOLD
         );
@@ -72,15 +101,15 @@ contract EdgeCaseIntegrationTest is Test {
 
         vm.stopPrank();
 
+        // Fund and approve for lender
         vm.deal(borrower, 100 ether);
-
         vm.startPrank(lender);
         usdc.mint(lender, 50000e6);
         usdc.approve(address(offerBook), 50000e6);
         vm.stopPrank();
     }
 
-    function _getCurrentPrice() internal returns (uint256) {
+    function _getCurrentPrice() internal view returns (uint256) {
         (, int256 price,,,) = oracle.latestRoundData();
         return uint256(price);
     }
@@ -137,30 +166,21 @@ contract EdgeCaseIntegrationTest is Test {
         emit log("===== POSITION STATE =====");
         emit log_named_uint("Active Positions", active);
 
-        uint256[] memory positions = nft.getLenderPositions(lender);
-        for (uint256 i = 0; i < positions.length && i < 5; i++) {
+        uint256[] memory positions_arr = nft.getLenderPositions(lender);
+        for (uint256 i = 0; i < positions_arr.length && i < 5; i++) {
             string memory label = string(abi.encodePacked("Position ", vm.toString(i)));
-            emit log_named_uint(label, positions[i]);
+            emit log_named_uint(label, positions_arr[i]);
         }
         emit log("");
     }
 
-    // CORRECTED: This function now properly accrues interest without reverting
     function _accrueInterest() internal {
-        // Need to trigger interest accrual with a successful transaction
-        // Use repay(1) which will accrue interest and succeed
         vm.startPrank(borrower);
-
-        // Mint 1 wei of USDC to borrower for the repayment
-        usdc.mint(borrower, 1);
-        usdc.approve(address(market), 1);
-
-        // This will accrue interest AND succeed (repaying 1 unit)
-        // Only call if there's debt to avoid revert
         if (market.getTotalOwed() > 0) {
+            usdc.mint(borrower, 1);
+            usdc.approve(address(market), 1);
             market.repay(1);
         }
-
         vm.stopPrank();
     }
 
@@ -284,16 +304,13 @@ contract EdgeCaseIntegrationTest is Test {
         uint256 debtAfterBorrow = market.getTotalOwed();
         assertEq(debtAfterBorrow, BORROW_AMOUNT);
 
-        // Properly accrue interest for 30 days
         _warpAndAccrue(30 days);
 
         uint256 totalOwed = market.getTotalOwed();
-        // Interest should be: 10,000 * 8% * (30/365) = 65.753424 USDC
         uint256 expectedInterest = (BORROW_AMOUNT * APR * 30 days) / (365 days * 10000);
-        assertApproxEqAbs(totalOwed, BORROW_AMOUNT + expectedInterest, 100); // Allow small rounding
+        assertApproxEqAbs(totalOwed, BORROW_AMOUNT + expectedInterest, 100);
         _snapshot("AFTER FIRST ACCRUAL");
 
-        // Repay 20%
         uint256 repayment20Percent = (totalOwed * 20) / 100;
         _repay(repayment20Percent);
 
@@ -301,14 +318,12 @@ contract EdgeCaseIntegrationTest is Test {
         assertApproxEqAbs(afterFirstRepayment, totalOwed - repayment20Percent, 2);
         _snapshot("AFTER 20% REPAYMENT");
 
-        // Wait another month
         _warpAndAccrue(30 days);
 
         uint256 afterSecondMonth = market.getTotalOwed();
         assertGt(afterSecondMonth, afterFirstRepayment);
         _snapshot("AFTER SECOND ACCRUAL");
 
-        // Repay 50% of remaining
         uint256 repayment50Percent = (afterSecondMonth * 50) / 100;
         _repay(repayment50Percent);
 
@@ -316,14 +331,12 @@ contract EdgeCaseIntegrationTest is Test {
         assertApproxEqAbs(afterSecondRepayment, afterSecondMonth - repayment50Percent, 2);
         _snapshot("AFTER 50% REPAYMENT");
 
-        // Wait one more month
         _warpAndAccrue(30 days);
 
         uint256 beforeFinalRepayment = market.getTotalOwed();
         assertGt(beforeFinalRepayment, afterSecondRepayment);
         _snapshot("BEFORE FINAL REPAYMENT");
 
-        // Repay remaining balance
         _repayFull();
 
         assertEq(market.getTotalOwed(), 0);
@@ -529,33 +542,27 @@ contract EdgeCaseIntegrationTest is Test {
         _depositCollateral(COLLATERAL_AMOUNT);
         _borrow(BORROW_AMOUNT);
 
-        uint256 positionId = 1; // First position ID
+        uint256 positionId = 1;
 
-        // Check initial state
         assertEq(market.positionAccruedInterest(positionId), 0);
         assertEq(market.getTotalOwed(), BORROW_AMOUNT);
 
-        // Accrue interest for 30 days
         vm.warp(block.timestamp + 30 days);
         vm.prank(owner);
         oracle.setFresh(int256(_getCurrentPrice()));
 
-        // Use repay(1) to trigger accrual
         vm.startPrank(borrower);
         usdc.mint(borrower, 1);
         usdc.approve(address(market), 1);
         market.repay(1);
         vm.stopPrank();
 
-        // Interest should be added to positionAccruedInterest
         uint256 accruedInterest = market.positionAccruedInterest(positionId);
         assertGt(accruedInterest, 0);
 
-        // Verify interest amount is correct
         uint256 expectedInterest = (BORROW_AMOUNT * APR * 30 days) / (365 days * 10000);
         assertApproxEqAbs(accruedInterest, expectedInterest, 100);
 
-        // Total owed should include interest
         assertApproxEqAbs(market.getTotalOwed(), BORROW_AMOUNT + expectedInterest, 100);
 
         emit log("=== Interest Accrual Test Passed ===");

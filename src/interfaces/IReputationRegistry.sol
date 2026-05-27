@@ -22,10 +22,14 @@ interface IReputationRegistry {
         uint256 lastUpdateTime;
     }
 
+    // Core functions
     function registerBorrower(address borrower) external;
+    function registerMarket(address market) external;
     function recordBorrowActivity(address borrower, uint256 borrowAmount) external;
     function recordSuccessfulRepayment(address borrower, uint256 repaidAmount) external;
     function recordDefault(address borrower, uint256 originalDebt, uint256 recoveredAmount) external;
+
+    // View functions
     function getBorrowerProfile(address borrower) external view returns (BorrowerProfile memory);
     function getRiskLabel(address borrower) external view returns (RiskLabel);
     function getReputationScore(address borrower) external view returns (uint256);

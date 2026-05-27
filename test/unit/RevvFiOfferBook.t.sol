@@ -2,12 +2,16 @@
 pragma solidity 0.8.33;
 
 import "forge-std/Test.sol";
+import "@openzeppelin/contracts/proxy/Clones.sol";
 import "../../src/RevvFiOfferBook.sol";
 import "../../src/libraries/RevvFiErrors.sol";
 import "../mocks/MockERC20.sol";
 
 contract RevvFiOfferBookTest is Test {
+    using Clones for address;
+
     RevvFiOfferBook public offerBook;
+    RevvFiOfferBook public implementation;
     MockERC20 public borrowToken;
 
     address public factory = address(0x1);
@@ -23,12 +27,18 @@ contract RevvFiOfferBookTest is Test {
         vm.startPrank(factory);
 
         borrowToken = new MockERC20("USD Coin", "USDC", 6);
-        offerBook = new RevvFiOfferBook(factory);
-        offerBook.initialize(market, address(borrowToken));
+
+        // Deploy implementation contract
+        implementation = new RevvFiOfferBook();
+
+        // Clone the implementation to get a fresh instance that can be initialized
+        offerBook = RevvFiOfferBook(address(implementation).clone());
+
+        // Initialize the clone
+        offerBook.initialize(factory, market, address(borrowToken));
 
         vm.stopPrank();
 
-        // Mint tokens for lenders
         vm.startPrank(lender1);
         borrowToken.mint(lender1, 10000e6);
         borrowToken.approve(address(offerBook), 10000e6);
@@ -56,7 +66,7 @@ contract RevvFiOfferBookTest is Test {
         assertEq(offer.apr, 800);
         assertEq(offer.seniority, 0);
         assertTrue(offer.active);
-        assertTrue(offer.isSenior);
+        assertTrue(offer.seniority == 0);
     }
 
     function test_CannotSubmitZeroAmount() public {
@@ -102,20 +112,15 @@ contract RevvFiOfferBookTest is Test {
     }
 
     function test_CannotModifyToLessThanFilled() public {
-        // Lender submits offer
         vm.prank(lender1);
         uint256 offerId = offerBook.submitOffer(1000e6, 800, 0, 30 days);
 
-        // Market borrows 600e6 from the offer (partial fill)
         vm.prank(market);
         offerBook.executeDrawdown(600e6, false);
 
-        // Verify the offer now has 400e6 remaining
         RevvFiOfferBook.Offer memory offer = offerBook.getOffer(offerId);
         assertEq(offer.remainingAmount, 400e6);
 
-        // Try to modify the offer to 500e6 total (but 600e6 already filled)
-        // This should revert because new total (500e6) < filled amount (600e6)
         vm.prank(lender1);
         vm.expectRevert(RevvFiErrors.InsufficientOfferAmount.selector);
         offerBook.modifyOffer(offerId, 500e6, 900, 60 days);
@@ -125,7 +130,7 @@ contract RevvFiOfferBookTest is Test {
         vm.prank(lender1);
         offerBook.submitOffer(1000e6, 800, 0, 30 days);
 
-        (RevvFiOfferBook.Offer[] memory offers, uint256 totalAvailable, uint256 weightedApr) =
+        (IRevvFiOfferBook.Offer[] memory offers, uint256 totalAvailable, uint256 weightedApr) =
             offerBook.getBestOffers(1000e6, false);
 
         assertEq(offers.length, 1);
@@ -135,45 +140,41 @@ contract RevvFiOfferBookTest is Test {
 
     function test_GetBestOffers_MultipleOffers() public {
         vm.prank(lender1);
-        offerBook.submitOffer(1000e6, 1000, 0, 30 days); // 10% APR
+        offerBook.submitOffer(1000e6, 1000, 0, 30 days);
         vm.prank(lender2);
-        offerBook.submitOffer(1000e6, 800, 0, 30 days); // 8% APR
+        offerBook.submitOffer(1000e6, 800, 0, 30 days);
         vm.prank(lender3);
-        offerBook.submitOffer(1000e6, 1200, 0, 30 days); // 12% APR
+        offerBook.submitOffer(1000e6, 1200, 0, 30 days);
 
-        (RevvFiOfferBook.Offer[] memory offers, uint256 totalAvailable, uint256 weightedApr) =
+        (IRevvFiOfferBook.Offer[] memory offers, uint256 totalAvailable, uint256 weightedApr) =
             offerBook.getBestOffers(1500e6, false);
 
-        // Should get the 8% and 10% offers (lowest APR first)
         assertEq(offers.length, 2);
         assertEq(offers[0].apr, 800);
         assertEq(offers[1].apr, 1000);
         assertEq(totalAvailable, 1500e6);
-
-        // Weighted average (800*1000 + 1000*500)/1500 = 866.67
         assertApproxEqAbs(weightedApr, 867, 1);
     }
 
     function test_GetBestOffers_SeniorOnly() public {
         vm.prank(lender1);
-        offerBook.submitOffer(1000e6, 1000, 0, 30 days); // Senior
+        offerBook.submitOffer(1000e6, 1000, 0, 30 days);
         vm.prank(lender2);
-        offerBook.submitOffer(1000e6, 800, 1, 30 days); // Junior
+        offerBook.submitOffer(1000e6, 800, 1, 30 days);
 
-        (RevvFiOfferBook.Offer[] memory offers, uint256 totalAvailable, uint256 weightedApr) =
+        (IRevvFiOfferBook.Offer[] memory offers, uint256 totalAvailable, uint256 weightedApr) =
             offerBook.getBestOffers(1000e6, true);
 
-        // Should only get senior offers
         assertEq(offers.length, 1);
         assertEq(offers[0].apr, 1000);
-        assertTrue(offers[0].isSenior);
+        assertTrue(offers[0].seniority == 0);
     }
 
     function test_GetBestOffers_InsufficientLiquidity() public {
         vm.prank(lender1);
         offerBook.submitOffer(500e6, 800, 0, 30 days);
 
-        (RevvFiOfferBook.Offer[] memory offers, uint256 totalAvailable, uint256 weightedApr) =
+        (IRevvFiOfferBook.Offer[] memory offers, uint256 totalAvailable, uint256 weightedApr) =
             offerBook.getBestOffers(1000e6, false);
 
         assertEq(offers.length, 0);
@@ -193,7 +194,7 @@ contract RevvFiOfferBookTest is Test {
         assertEq(filledOffers.length, 2);
 
         RevvFiOfferBook.Offer memory offer1 = offerBook.getOffer(filledOffers[0].id);
-        assertEq(offer1.remainingAmount, 0); // Fully filled
+        assertEq(offer1.remainingAmount, 0);
         assertFalse(offer1.active);
     }
 
@@ -218,5 +219,14 @@ contract RevvFiOfferBookTest is Test {
         offerBook.submitOffer(2000e6, 900, 0, 30 days);
 
         assertEq(offerBook.getTotalLiquidityAvailable(), 3000e6);
+    }
+
+    function test_GetActiveOfferCount() public {
+        vm.prank(lender1);
+        offerBook.submitOffer(1000e6, 800, 0, 30 days);
+        vm.prank(lender2);
+        offerBook.submitOffer(2000e6, 900, 0, 30 days);
+
+        assertEq(offerBook.getActiveOfferCount(), 2);
     }
 }

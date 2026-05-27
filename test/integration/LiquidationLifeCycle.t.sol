@@ -11,6 +11,7 @@ import "../../src/RevvFiCollateralEscrow.sol";
 import "../../src/RevvFiLiquidator.sol";
 import "../../src/RevvFiLiquidityQueue.sol";
 import "../../src/ReputationRegistry.sol";
+import "../../src/libraries/RevvFiErrors.sol";
 import "../../src/interfaces/IRevvFiOfferBook.sol";
 import "../../src/interfaces/IRevvFiPositionNFT.sol";
 import "../../src/interfaces/IRevvFiCollateralEscrow.sol";
@@ -41,10 +42,10 @@ contract LiquidationLifecycleTest is Test {
 
     uint256 public constant DEPLOYMENT_FEE = 0.1 ether;
     uint256 public constant COLLATERAL_AMOUNT = 15 ether;
-    uint256 public constant BORROW_AMOUNT = 15000e6; // 15,000 USDC
-    uint256 public constant APR = 800; // 8%
-    uint256 public constant MIN_COLLATERAL_RATIO = 11000; // 110%
-    uint256 public constant LIQUIDATION_THRESHOLD = 9500; // 95%
+    uint256 public constant BORROW_AMOUNT = 15000e6;
+    uint256 public constant APR = 800;
+    uint256 public constant MIN_COLLATERAL_RATIO = 11000;
+    uint256 public constant LIQUIDATION_THRESHOLD = 9500;
 
     function setUp() public {
         vm.deal(owner, DEPLOYMENT_FEE);
@@ -54,12 +55,40 @@ contract LiquidationLifecycleTest is Test {
         weth = new MockERC20("Wrapped Ether", "WETH", 18);
         oracle = new MockOracle(8, 2000e8);
 
+        // Deploy implementation contracts
+        address marketImpl = address(new RevvFiMarket());
+        address escrowImpl = address(new RevvFiCollateralEscrow());
+        address offerBookImpl = address(new RevvFiOfferBook());
+        address liquidityQueueImpl = address(new RevvFiLiquidityQueue());
+
+        // Deploy Factory FIRST
+        factory = new RevvFiFactory(
+            owner, // feeRecipient
+            DEPLOYMENT_FEE, // deploymentFee
+            marketImpl, // marketImpl
+            escrowImpl, // escrowImpl
+            offerBookImpl, // offerBookImpl
+            liquidityQueueImpl // liquidityQueueImpl
+        );
+
+        // Deploy ArchController
         archController = new RevvFiArchController();
         archController.registerBorrower(borrower);
 
-        factory = new RevvFiFactory(address(archController), owner, DEPLOYMENT_FEE);
+        // Deploy core contracts WITH factory address (no setFactory needed)
+        positionNFT = IRevvFiPositionNFT(address(new RevvFiPositionNFT(address(factory))));
+        liquidator = IRevvFiLiquidator(address(new RevvFiLiquidator(address(factory))));
+        reputationRegistry = IReputationRegistry(address(new ReputationRegistry(address(factory))));
+
+        // Set core contracts in factory
+        factory.setCoreContracts(
+            address(archController), address(positionNFT), address(liquidator), address(reputationRegistry)
+        );
+
+        // Register factory with ArchController
         factory.registerWithArchController();
 
+        // Deploy market
         address marketAddr = factory.deployMarket{value: DEPLOYMENT_FEE}(
             borrower, address(usdc), address(weth), address(oracle), 18, 6, MIN_COLLATERAL_RATIO, LIQUIDATION_THRESHOLD
         );
@@ -86,11 +115,14 @@ contract LiquidationLifecycleTest is Test {
         vm.stopPrank();
     }
 
-    // Helper to trigger interest accrual
     function _accrueInterest() internal {
-        vm.prank(borrower);
-        vm.expectRevert();
-        market.borrow(0, false, 1200);
+        vm.startPrank(borrower);
+        if (market.getTotalOwed() > 0) {
+            usdc.mint(borrower, 1);
+            usdc.approve(address(market), 1);
+            market.repay(1);
+        }
+        vm.stopPrank();
     }
 
     function test_LiquidationLifecycle() public {
@@ -114,8 +146,6 @@ contract LiquidationLifecycleTest is Test {
         assertTrue(market.isHealthy());
         assertFalse(market.isLiquidatable());
 
-        // Drop price below liquidation threshold
-        // 15 ETH * $945 = $14,175, debt $15,000 = 94.5% (9450 bps) < 9500 bps
         vm.prank(owner);
         oracle.setPrice(945e8);
 
@@ -213,20 +243,41 @@ contract LiquidationLifecycleTest is Test {
         uint256 auctionId = market.liquidationAuctionId();
         uint256 debtAmount = market.getTotalOwed();
 
+        // Calculate reserve price (80% of debt)
+        uint256 reservePrice = (debtAmount * 80) / 100;
+
+        // Calculate steps needed to reach reserve price
+        // Price decreases by 500 bps (5%) every hour
+        // Starting price = debtAmount
+        // Need to find steps where debtAmount - (debtAmount * 500 * steps / 10000) <= reservePrice
+        // debtAmount * (1 - 0.05 * steps) <= 0.8 * debtAmount
+        // 1 - 0.05 * steps <= 0.8
+        // 0.2 <= 0.05 * steps
+        // steps >= 4
         uint256 stepsNeeded = 4;
         uint256 timeToWait = stepsNeeded * 1 hours;
         vm.warp(block.timestamp + timeToWait);
 
         uint256 currentPrice = liquidator.getCurrentPrice(auctionId);
-        uint256 partialBid = (debtAmount * 80) / 100;
 
-        assertApproxEqAbs(currentPrice, partialBid, 1e6);
+        // Current price should be at or near reserve price
+        assertApproxEqAbs(currentPrice, reservePrice, 1e6);
+
+        // Calculate minimum bid (reserve price or highest bid + increment)
+        // Since no bids yet, min bid = current price
+        uint256 minBid = currentPrice;
+
+        // Place a bid at the current price (not less)
+        vm.prank(liquidatorAddress);
+        usdc.approve(address(liquidator), minBid);
 
         vm.prank(liquidatorAddress);
-        usdc.approve(address(liquidator), partialBid);
+        liquidator.placeBid(auctionId, minBid);
 
-        vm.prank(liquidatorAddress);
-        liquidator.placeBid(auctionId, partialBid);
+        // Verify bid was placed successfully
+        IRevvFiLiquidator.Auction memory auction = liquidator.getAuction(auctionId);
+        assertEq(auction.highestBid, minBid);
+        assertEq(auction.highestBidder, liquidatorAddress);
 
         vm.warp(block.timestamp + 4 days);
 
@@ -234,18 +285,18 @@ contract LiquidationLifecycleTest is Test {
         liquidator.settleAuction(auctionId);
 
         vm.prank(address(liquidator));
-        market.settleLiquidation(partialBid, 0);
+        market.settleLiquidation(minBid, 0);
 
         assertGt(market.badDebt(), 0);
         assertGt(market.totalRealizedLoss(), 0);
 
-        // Verify reputation was penalized for default
         uint256 reputation = reputationRegistry.getReputationScore(borrower);
         assertLt(reputation, 500);
 
         emit log("=== Partial Bid Liquidation Test Passed ===");
         emit log_named_uint("Total Debt", debtAmount / 1e6);
-        emit log_named_uint("Partial Bid", partialBid / 1e6);
+        emit log_named_uint("Reserve Price (80%)", reservePrice / 1e6);
+        emit log_named_uint("Actual Bid", minBid / 1e6);
         emit log_named_uint("Bad Debt", market.badDebt() / 1e6);
         emit log_named_uint("Borrower Reputation", reputation);
     }
@@ -262,7 +313,7 @@ contract LiquidationLifecycleTest is Test {
         vm.stopPrank();
 
         vm.prank(borrower);
-        vm.expectRevert(abi.encodeWithSignature("InsufficientCollateral()"));
+        vm.expectRevert(RevvFiErrors.InsufficientCollateral.selector);
         market.liquidate();
     }
 
@@ -279,7 +330,6 @@ contract LiquidationLifecycleTest is Test {
 
         uint256 reputationBefore = reputationRegistry.getReputationScore(borrower);
 
-        // Force liquidation
         vm.prank(owner);
         oracle.setPrice(945e8);
         _accrueInterest();

@@ -56,12 +56,40 @@ contract FullLoanLifecycleTest is Test {
         weth = new MockERC20("Wrapped Ether", "WETH", 18);
         oracle = new MockOracle(8, 2000e8);
 
+        // Deploy implementation contracts
+        address marketImpl = address(new RevvFiMarket());
+        address escrowImpl = address(new RevvFiCollateralEscrow());
+        address offerBookImpl = address(new RevvFiOfferBook());
+        address liquidityQueueImpl = address(new RevvFiLiquidityQueue());
+
+        // Deploy Factory FIRST
+        factory = new RevvFiFactory(
+            owner, // feeRecipient
+            DEPLOYMENT_FEE, // deploymentFee
+            marketImpl, // marketImpl
+            escrowImpl, // escrowImpl
+            offerBookImpl, // offerBookImpl
+            liquidityQueueImpl // liquidityQueueImpl
+        );
+
+        // Deploy ArchController
         archController = new RevvFiArchController();
         archController.registerBorrower(borrower);
 
-        factory = new RevvFiFactory(address(archController), owner, DEPLOYMENT_FEE);
+        // Deploy core contracts WITH factory address (no setFactory needed)
+        positionNFT = IRevvFiPositionNFT(address(new RevvFiPositionNFT(address(factory))));
+        liquidator = IRevvFiLiquidator(address(new RevvFiLiquidator(address(factory))));
+        reputationRegistry = IReputationRegistry(address(new ReputationRegistry(address(factory))));
+
+        // Set core contracts in factory
+        factory.setCoreContracts(
+            address(archController), address(positionNFT), address(liquidator), address(reputationRegistry)
+        );
+
+        // Register factory with ArchController
         factory.registerWithArchController();
 
+        // Deploy market
         address marketAddr = factory.deployMarket{value: DEPLOYMENT_FEE}(
             borrower, address(usdc), address(weth), address(oracle), 18, 6, MIN_COLLATERAL_RATIO, LIQUIDATION_THRESHOLD
         );
@@ -93,37 +121,26 @@ contract FullLoanLifecycleTest is Test {
         vm.stopPrank();
     }
 
-    // CORRECTED: Properly accrue interest using repay(1) instead of borrow(0)
+    function _getCurrentPrice() internal view returns (uint256) {
+        (, int256 price,,,) = oracle.latestRoundData();
+        return uint256(price);
+    }
+
     function _accrueInterest() internal {
-        // Only accrue if there's debt to avoid reverts
         if (market.getTotalOwed() == 0) return;
 
         vm.startPrank(borrower);
-
-        // Mint 1 unit of USDC to borrower for the repayment
         usdc.mint(borrower, 1);
         usdc.approve(address(market), 1);
-
-        // This will accrue interest and succeed
         market.repay(1);
-
         vm.stopPrank();
     }
 
-    // Helper to warp time and accrue interest
     function _warpAndAccrue(uint256 duration) internal {
         vm.warp(block.timestamp + duration);
-
-        // Refresh oracle price to avoid stale price errors
         vm.prank(owner);
         oracle.setFresh(int256(_getCurrentPrice()));
-
         _accrueInterest();
-    }
-
-    function _getCurrentPrice() internal returns (uint256) {
-        (, int256 price,,,) = oracle.latestRoundData();
-        return uint256(price);
     }
 
     function test_FullLoanLifecycle() public {
@@ -147,18 +164,13 @@ contract FullLoanLifecycleTest is Test {
         assertEq(usdc.balanceOf(borrower), BORROW_AMOUNT);
         assertEq(market.getTotalOwed(), BORROW_AMOUNT);
 
-        // Calculate weighted APR from the borrow
-        // 6000e6 at 800 APR + 4000e6 at 1000 APR = weighted avg of 880
         uint256 weightedApr = 880;
 
-        // Warp time and accrue interest properly
         _warpAndAccrue(365 days);
 
-        // Get the total owed including interest
         uint256 totalOwed = market.getTotalOwed();
         assertGt(totalOwed, BORROW_AMOUNT);
 
-        // Calculate expected interest using the weighted APR
         uint256 expectedInterest = (BORROW_AMOUNT * weightedApr * 365 days) / (365 days * 10000);
         assertApproxEqAbs(totalOwed, BORROW_AMOUNT + expectedInterest, 100);
 
@@ -172,7 +184,6 @@ contract FullLoanLifecycleTest is Test {
 
         RevvFiPositionNFT concretePositionNFT = RevvFiPositionNFT(address(positionNFT));
 
-        // Process lender1 positions
         uint256[] memory lender1Positions = concretePositionNFT.getLenderPositions(lender1);
         for (uint256 i = 0; i < lender1Positions.length; i++) {
             vm.prank(lender1);
@@ -182,7 +193,6 @@ contract FullLoanLifecycleTest is Test {
             }
         }
 
-        // Process lender2 positions
         uint256[] memory lender2Positions = concretePositionNFT.getLenderPositions(lender2);
         for (uint256 i = 0; i < lender2Positions.length; i++) {
             vm.prank(lender2);
@@ -192,13 +202,12 @@ contract FullLoanLifecycleTest is Test {
             }
         }
 
-        // Verify lenders received funds (principal + interest)
         assertGt(usdc.balanceOf(lender1), 6000e6);
         assertGt(usdc.balanceOf(lender2), 4000e6);
 
         uint256 reputation = reputationRegistry.getReputationScore(borrower);
         assertGt(reputation, 500);
-        assertEq(reputation, 1000); // Perfect repayment should give max score
+        assertEq(reputation, 1000);
     }
 
     function test_InterestAccruesCorrectly() public {
@@ -210,15 +219,11 @@ contract FullLoanLifecycleTest is Test {
         weth.approve(address(market), COLLATERAL_AMOUNT);
         market.depositCollateral(COLLATERAL_AMOUNT);
 
-        // Record borrow timestamp
         uint256 borrowTimestamp = block.timestamp;
         market.borrow(BORROW_AMOUNT, false, 1200);
         vm.stopPrank();
 
-        // Warp exactly 180 days from borrow time
         vm.warp(borrowTimestamp + 180 days);
-
-        // Refresh oracle and accrue interest
         vm.prank(owner);
         oracle.setFresh(int256(_getCurrentPrice()));
         _accrueInterest();
@@ -226,10 +231,8 @@ contract FullLoanLifecycleTest is Test {
         uint256 totalOwed = market.getTotalOwed();
         uint256 expectedInterest = BORROW_AMOUNT * APR_1 * 180 days / (365 days * 10000);
 
-        // Allow for small rounding differences (1 unit = $0.000001)
         assertApproxEqAbs(totalOwed, BORROW_AMOUNT + expectedInterest, 100);
 
-        // Verify that positionAccruedInterest was updated
         uint256[] memory positions = positionNFT.getLenderPositions(lender1);
         assertGt(positions.length, 0);
         uint256 positionId = positions[0];
@@ -255,13 +258,11 @@ contract FullLoanLifecycleTest is Test {
 
         assertEq(market.getTotalOwed(), 8000e6);
 
-        // Verify positions were created correctly
         RevvFiPositionNFT concretePositionNFT = RevvFiPositionNFT(address(positionNFT));
         assertEq(concretePositionNFT.getActivePositionCount(lender1), 1);
         assertEq(concretePositionNFT.getActivePositionCount(lender2), 1);
         assertEq(concretePositionNFT.getActivePositionCount(lender3), 1);
 
-        // Verify each position has correct APR
         uint256[] memory lender1Positions = concretePositionNFT.getLenderPositions(lender1);
         uint256[] memory lender2Positions = concretePositionNFT.getLenderPositions(lender2);
         uint256[] memory lender3Positions = concretePositionNFT.getLenderPositions(lender3);
@@ -285,7 +286,6 @@ contract FullLoanLifecycleTest is Test {
         uint256 reputationBefore = reputationRegistry.getReputationScore(borrower);
         assertEq(reputationBefore, 500);
 
-        // Accrue a small amount of interest to test full repayment with interest
         vm.warp(block.timestamp + 30 days);
         vm.prank(owner);
         oracle.setFresh(int256(_getCurrentPrice()));
@@ -302,9 +302,8 @@ contract FullLoanLifecycleTest is Test {
 
         uint256 reputationAfter = reputationRegistry.getReputationScore(borrower);
         assertGt(reputationAfter, reputationBefore);
-        assertEq(reputationAfter, 1000); // Perfect repayment should give max score
+        assertEq(reputationAfter, 1000);
 
-        // Verify borrower profile was updated
         IReputationRegistry.BorrowerProfile memory profile = reputationRegistry.getBorrowerProfile(borrower);
         assertEq(profile.successfulLoans, 1);
         assertEq(profile.defaultedLoans, 0);
@@ -324,14 +323,12 @@ contract FullLoanLifecycleTest is Test {
 
         assertEq(market.getTotalOwed(), BORROW_AMOUNT);
 
-        // Accrue interest for 6 months
         _warpAndAccrue(180 days);
 
         uint256 totalOwed = market.getTotalOwed();
         uint256 expectedInterest = BORROW_AMOUNT * APR_1 * 180 days / (365 days * 10000);
         assertApproxEqAbs(totalOwed, BORROW_AMOUNT + expectedInterest, 100);
 
-        // Repay half
         uint256 halfRepayment = totalOwed / 2;
         vm.startPrank(borrower);
         usdc.mint(borrower, halfRepayment);
@@ -342,13 +339,11 @@ contract FullLoanLifecycleTest is Test {
         uint256 remainingDebt = market.getTotalOwed();
         assertApproxEqAbs(remainingDebt, totalOwed - halfRepayment, 2);
 
-        // Accrue more interest on the remaining debt
         _warpAndAccrue(90 days);
 
         uint256 finalDebt = market.getTotalOwed();
         assertGt(finalDebt, remainingDebt);
 
-        // Repay remaining
         vm.startPrank(borrower);
         usdc.mint(borrower, finalDebt);
         usdc.approve(address(market), finalDebt);
@@ -357,7 +352,6 @@ contract FullLoanLifecycleTest is Test {
 
         assertEq(market.getTotalOwed(), 0);
 
-        // Verify reputation increased
         uint256 reputation = reputationRegistry.getReputationScore(borrower);
         assertGt(reputation, 500);
     }
