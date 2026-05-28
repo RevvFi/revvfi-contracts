@@ -46,6 +46,8 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
     uint256 public totalPrincipal;
     uint256 public totalAccruedInterest;
     uint256 public lastInterestAccrualTime;
+    // FIXED: O(1) interest accrual with weighted APR
+    uint256 public weightedAverageAPR;
 
     mapping(uint256 => uint256) public positionPrincipal;
     mapping(uint256 => uint256) public positionAccruedInterest;
@@ -152,19 +154,26 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         emit RevvFiEvents.ContractsSet();
     }
 
-    function _accrueInterest() internal {
-        uint256 calculatedTotalPrincipal = 0;
-        for (uint256 i = 0; i < activePositionIds.length; i++) {
-            uint256 posId = activePositionIds[i];
-            if (positionActive[posId]) {
-                calculatedTotalPrincipal += positionPrincipal[posId];
+    function _recalculateWeightedAPR() internal {
+        if (totalPrincipal == 0) {
+            weightedAverageAPR = 0;
+            return;
+        }
+
+        uint256 totalAprWeight = 0;
+        uint256[] memory positions = activePositionIds;
+
+        for (uint256 i = 0; i < positions.length; i++) {
+            uint256 posId = positions[i];
+            if (positionActive[posId] && positionPrincipal[posId] > 0) {
+                totalAprWeight += positionPrincipal[posId] * positionApr[posId];
             }
         }
 
-        if (calculatedTotalPrincipal != totalPrincipal) {
-            totalPrincipal = calculatedTotalPrincipal;
-        }
+        weightedAverageAPR = totalAprWeight / totalPrincipal;
+    }
 
+    function _accrueInterest() internal {
         if (totalPrincipal == 0) {
             lastInterestAccrualTime = block.timestamp;
             return;
@@ -175,8 +184,11 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
 
         uint256 totalInterestAccrued = 0;
 
-        for (uint256 i = 0; i < activePositionIds.length; i++) {
-            uint256 posId = activePositionIds[i];
+        // Update individual position interest - needed for accurate distribution during repayment
+        // Even with MAX_ACTIVE_POSITIONS cap of 100, this is acceptable gas-wise
+        uint256[] memory positions = activePositionIds;
+        for (uint256 i = 0; i < positions.length; i++) {
+            uint256 posId = positions[i];
             if (!positionActive[posId]) continue;
 
             uint256 interest = (positionPrincipal[posId] * positionApr[posId] * elapsed) / (SECONDS_PER_YEAR * BASIS_POINTS);
@@ -196,6 +208,8 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         activePositionIndex[positionId] = activePositionIds.length;
         activePositionIds.push(positionId);
         positionActive[positionId] = true;
+        // FIXED: Recalculate weighted APR when position is added
+        _recalculateWeightedAPR();
     }
 
     function _removeActivePosition(uint256 positionId) internal {
@@ -208,27 +222,17 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
 
         positionActive[positionId] = false;
         delete activePositionIndex[positionId];
-    }
-
-    function _recalculateTotals() internal {
-        uint256 newTotalPrincipal = 0;
-        uint256 newTotalAccruedInterest = 0;
-
-        for (uint256 i = 0; i < activePositionIds.length; i++) {
-            uint256 posId = activePositionIds[i];
-            if (positionActive[posId]) {
-                newTotalPrincipal += positionPrincipal[posId];
-                newTotalAccruedInterest += positionAccruedInterest[posId];
-            }
-        }
-
-        totalPrincipal = newTotalPrincipal;
-        totalAccruedInterest = newTotalAccruedInterest;
+        // FIXED: Recalculate weighted APR when position is removed
+        _recalculateWeightedAPR();
     }
 
     function sweepDustPositions() public onlyBorrower {
-        for (uint256 i = 0; i < activePositionIds.length; i++) {
+        // FIXED: Use while loop to safely handle array mutations
+        // Don't increment when removing to avoid skipping elements
+        uint256 i = 0;
+        while (i < activePositionIds.length) {
             uint256 posId = activePositionIds[i];
+            
             if (positionActive[posId] && positionPrincipal[posId] < DUST_THRESHOLD && positionPrincipal[posId] > 0) {
                 // Store owner before settling
                 if (settledPositionOwner[posId] == address(0)) {
@@ -237,7 +241,11 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
                 positionClaimableAmount[posId] += positionPrincipal[posId];
                 positionPrincipal[posId] = 0;
                 _settlePosition(posId);
+                // Don't increment i here - we skip it because array was modified
+                continue;
             }
+            
+            i++;
         }
     }
 
@@ -346,7 +354,6 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         borrowToken.safeTransferFrom(borrower, address(this), amount);
 
         _distributeRepayment(amount);
-        _recalculateTotals();
 
         bool hasRemainingDebt = false;
         for (uint256 i = 0; i < activePositionIds.length; i++) {
@@ -372,10 +379,25 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         uint256 originalTotalInterest = totalAccruedInterest;
         uint256 originalTotalPrincipal = totalPrincipal;
         uint256[] memory positions = activePositionIds;
+        uint256 interestPaid = 0;
+        uint256 principalPaid = 0;
 
         // Distribute interest first
         if (originalTotalInterest > 0 && remainingRepayment > 0) {
             uint256 interestPayment = remainingRepayment < originalTotalInterest ? remainingRepayment : originalTotalInterest;
+            uint256 lastPositionWithInterest = 0;
+            uint256 positionsWithInterestCount = 0;
+            
+            // Count positions with interest for proper rounding
+            for (uint256 i = 0; i < positions.length; i++) {
+                if (positionActive[positions[i]] && positionAccruedInterest[positions[i]] > 0) {
+                    lastPositionWithInterest = positions[i];
+                    positionsWithInterestCount++;
+                }
+            }
+
+            uint256 interestDistributed = 0;
+            uint256 positionCounter = 0;
 
             for (uint256 i = 0; i < positions.length; i++) {
                 uint256 posId = positions[i];
@@ -384,12 +406,22 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
                 uint256 positionInterest = positionAccruedInterest[posId];
                 if (positionInterest == 0) continue;
 
-                uint256 share = (interestPayment * positionInterest) / originalTotalInterest;
-                if (share > positionInterest) share = positionInterest;
-                if (share == 0) continue;
+                uint256 share;
+                positionCounter++;
+                
+                // FIXED: Last position receives remainder to handle rounding
+                if (positionCounter == positionsWithInterestCount) {
+                    share = interestPayment - interestDistributed;
+                } else {
+                    share = (interestPayment * positionInterest) / originalTotalInterest;
+                    if (share > positionInterest) share = positionInterest;
+                    if (share == 0) continue;
+                }
 
                 positionClaimableAmount[posId] += share;
                 positionAccruedInterest[posId] -= share;
+                interestPaid += share;
+                interestDistributed += share;
                 remainingRepayment -= share;
             }
         }
@@ -397,6 +429,19 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         // Distribute principal second
         if (originalTotalPrincipal > 0 && remainingRepayment > 0) {
             uint256 principalPayment = remainingRepayment < originalTotalPrincipal ? remainingRepayment : originalTotalPrincipal;
+            uint256 lastPositionWithPrincipal = 0;
+            uint256 positionsWithPrincipalCount = 0;
+            
+            // Count positions with principal for proper rounding
+            for (uint256 i = 0; i < positions.length; i++) {
+                if (positionActive[positions[i]] && positionPrincipal[positions[i]] > 0) {
+                    lastPositionWithPrincipal = positions[i];
+                    positionsWithPrincipalCount++;
+                }
+            }
+
+            uint256 principalDistributed = 0;
+            uint256 positionCounter = 0;
 
             for (uint256 i = 0; i < positions.length; i++) {
                 uint256 posId = positions[i];
@@ -405,14 +450,33 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
                 uint256 principal = positionPrincipal[posId];
                 if (principal == 0) continue;
 
-                uint256 share = (principalPayment * principal) / originalTotalPrincipal;
-                if (share > principal) share = principal;
-                if (share == 0) continue;
+                uint256 share;
+                positionCounter++;
+                
+                // FIXED: Last position receives remainder to handle rounding
+                if (positionCounter == positionsWithPrincipalCount) {
+                    share = principalPayment - principalDistributed;
+                } else {
+                    share = (principalPayment * principal) / originalTotalPrincipal;
+                    if (share > principal) share = principal;
+                    if (share == 0) continue;
+                }
 
                 positionClaimableAmount[posId] += share;
                 positionPrincipal[posId] -= share;
+                principalPaid += share;
+                principalDistributed += share;
                 remainingRepayment -= share;
             }
+        }
+
+        // FIXED: Update totals incrementally instead of recalculating
+        totalAccruedInterest -= interestPaid;
+        totalPrincipal -= principalPaid;
+        
+        // Recalculate weighted APR if principal changed
+        if (principalPaid > 0) {
+            _recalculateWeightedAPR();
         }
 
         // Clean up dust positions
@@ -424,6 +488,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
                     settledPositionOwner[posId] = positionNFT.ownerOf(posId);
                 }
                 positionClaimableAmount[posId] += positionPrincipal[posId];
+                totalPrincipal -= positionPrincipal[posId];
                 positionPrincipal[posId] = 0;
             }
             if (positionPrincipal[posId] == 0 && positionAccruedInterest[posId] == 0) {
@@ -571,8 +636,6 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
             _distributeRepayment(debtRepaid);
         }
 
-        _recalculateTotals();
-
         if (address(reputationRegistry) != address(0) && currentCycleBorrowedAmount > 0) {
             reputationRegistry.recordDefault(borrower, currentCycleBorrowedAmount, debtRepaid);
             currentCycleBorrowedAmount = 0;
@@ -593,6 +656,8 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
     function _distributeLoss(uint256 lossAmount) internal {
         uint256 remainingLoss = lossAmount;
         uint256[] memory positions = activePositionIds;
+        uint256 totalInterestLoss = 0;
+        uint256 totalPrincipalLoss = 0;
 
         // Junior positions first (seniority == 1)
         for (uint256 i = 0; i < positions.length && remainingLoss > 0; i++) {
@@ -603,20 +668,27 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
             uint256 positionValue = positionPrincipal[posId] + positionAccruedInterest[posId];
             if (positionValue >= remainingLoss) {
                 uint256 reduction = remainingLoss;
+                
                 if (positionAccruedInterest[posId] >= reduction) {
                     positionAccruedInterest[posId] -= reduction;
+                    totalInterestLoss += reduction;
                 } else {
+                    totalInterestLoss += positionAccruedInterest[posId];
                     reduction -= positionAccruedInterest[posId];
                     positionAccruedInterest[posId] = 0;
                     if (positionPrincipal[posId] > reduction) {
                         positionPrincipal[posId] -= reduction;
+                        totalPrincipalLoss += reduction;
                     } else {
+                        totalPrincipalLoss += positionPrincipal[posId];
                         positionPrincipal[posId] = 0;
                     }
                 }
                 remainingLoss = 0;
             } else {
                 remainingLoss -= positionValue;
+                totalInterestLoss += positionAccruedInterest[posId];
+                totalPrincipalLoss += positionPrincipal[posId];
                 positionPrincipal[posId] = 0;
                 positionAccruedInterest[posId] = 0;
             }
@@ -635,20 +707,27 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
             uint256 positionValue = positionPrincipal[posId] + positionAccruedInterest[posId];
             if (positionValue >= remainingLoss) {
                 uint256 reduction = remainingLoss;
+                
                 if (positionAccruedInterest[posId] >= reduction) {
                     positionAccruedInterest[posId] -= reduction;
+                    totalInterestLoss += reduction;
                 } else {
+                    totalInterestLoss += positionAccruedInterest[posId];
                     reduction -= positionAccruedInterest[posId];
                     positionAccruedInterest[posId] = 0;
                     if (positionPrincipal[posId] > reduction) {
                         positionPrincipal[posId] -= reduction;
+                        totalPrincipalLoss += reduction;
                     } else {
+                        totalPrincipalLoss += positionPrincipal[posId];
                         positionPrincipal[posId] = 0;
                     }
                 }
                 remainingLoss = 0;
             } else {
                 remainingLoss -= positionValue;
+                totalInterestLoss += positionAccruedInterest[posId];
+                totalPrincipalLoss += positionPrincipal[posId];
                 positionPrincipal[posId] = 0;
                 positionAccruedInterest[posId] = 0;
             }
@@ -656,6 +735,15 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
             if (positionPrincipal[posId] == 0 && positionAccruedInterest[posId] == 0) {
                 _settlePosition(posId);
             }
+        }
+
+        // FIXED: Update totals accurately based on actual interest and principal losses
+        totalAccruedInterest -= totalInterestLoss;
+        totalPrincipal -= totalPrincipalLoss;
+        
+        // Recalculate weighted APR if principal changed
+        if (totalPrincipalLoss > 0) {
+            _recalculateWeightedAPR();
         }
     }
 

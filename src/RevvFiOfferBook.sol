@@ -55,6 +55,8 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
     uint256[] public aprValues;
     mapping(uint256 => uint256) public aprToIndex;
     uint256 public constant APR_STEP = 100; // 1% steps
+    // FIXED: Track which offers are in which buckets to prevent duplication
+    mapping(uint256 => uint256) public offerInBucketId;  // offerId -> bucketId (0 means not in any bucket)
 
     modifier onlyMarket() {
         if (msg.sender != market) revert RevvFiErrors.UnauthorizedCaller();
@@ -87,6 +89,26 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
 
     function _addToBucket(uint256 apr, uint256 offerId) internal {
         uint256 bucketId = _getBucketId(apr);
+        
+        // FIXED: Prevent duplication - only add if not already in this bucket
+        if (offerInBucketId[offerId] == bucketId) {
+            return;  // Already in this bucket
+        }
+        
+        // If offer is in a different bucket, remove it first
+        if (offerInBucketId[offerId] != 0) {
+            uint256 oldBucketId = offerInBucketId[offerId];
+            APRBucket storage oldBucket = aprBuckets[oldBucketId];
+            // Find and remove from old bucket
+            for (uint256 i = 0; i < oldBucket.offerIds.length; i++) {
+                if (oldBucket.offerIds[i] == offerId) {
+                    oldBucket.offerIds[i] = oldBucket.offerIds[oldBucket.offerIds.length - 1];
+                    oldBucket.offerIds.pop();
+                    break;
+                }
+            }
+        }
+        
         if (aprBuckets[bucketId].apr == 0) {
             aprBuckets[bucketId].apr = apr;
             aprToIndex[bucketId] = aprValues.length;
@@ -94,12 +116,16 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
         }
         aprBuckets[bucketId].offerIds.push(offerId);
         aprBuckets[bucketId].totalLiquidity += offers[offerId].remainingAmount;
+        offerInBucketId[offerId] = bucketId;
     }
 
     function _removeFromBucket(uint256 apr, uint256 offerId, uint256 amountRemoved) internal {
         uint256 bucketId = _getBucketId(apr);
         APRBucket storage bucket = aprBuckets[bucketId];
         bucket.totalLiquidity -= amountRemoved;
+        
+        // FIXED: Clear bucket tracking
+        offerInBucketId[offerId] = 0;
         
         // Remove offer from bucket if fully filled
         if (offers[offerId].remainingAmount == 0) {
