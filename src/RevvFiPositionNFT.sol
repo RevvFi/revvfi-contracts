@@ -38,17 +38,17 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
         bool isSenior;
     }
 
-    address public immutable factory;                           // Factory contract that created this NFT contract
-    mapping(uint256 => Position) public positions;              // Token ID => Position details
-    mapping(address => uint256[]) public lenderPositions;       // Lender address => Array of token IDs owned
+    address public immutable factory; // Factory contract that created this NFT contract
+    mapping(uint256 => Position) public positions; // Token ID => Position details
+    mapping(address => uint256[]) public lenderPositions; // Lender address => Array of token IDs owned
     mapping(address => mapping(uint256 => uint256)) public lenderPositionIndex; // Lender => Token ID => Index in array
-    mapping(address => bool) public approvedMarkets;            // Market address => Whether approved to mint/redeem
-    
-    uint256 private _nextTokenId;      // Next available token ID
-    string private _baseTokenURI;      // Base URI for token metadata
+    mapping(address => bool) public approvedMarkets; // Market address => Whether approved to mint/redeem
 
-    string public constant TOKEN_NAME = "RevvFi Position";       // NFT collection name
-    string public constant TOKEN_SYMBOL = "RVF-POS";             // NFT collection symbol
+    uint256 private _nextTokenId; // Next available token ID
+    string private _baseTokenURI; // Base URI for token metadata
+
+    string public constant TOKEN_NAME = "RevvFi Position"; // NFT collection name
+    string public constant TOKEN_SYMBOL = "RVF-POS"; // NFT collection symbol
 
     /**
      * @dev Modifier to restrict access to factory contract only
@@ -182,7 +182,7 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
             // Add to receiver's position list
             lenderPositionIndex[to][tokenId] = lenderPositions[to].length;
             lenderPositions[to].push(tokenId);
-        } 
+        }
         // Handle burn (to == address(0))
         else if (from != address(0) && to == address(0)) {
             uint256[] storage fromPositions = lenderPositions[from];
@@ -305,7 +305,7 @@ contract RevvFiPositionNFT is ERC721Enumerable, Ownable {
             )
         );
         image = "https://revvfi.com/images/position-nft.png";
-        attributes = "";  // Reserved for future attribute expansion
+        attributes = ""; // Reserved for future attribute expansion
     }
 
     /**

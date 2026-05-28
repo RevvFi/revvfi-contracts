@@ -19,13 +19,13 @@ import "./libraries/RevvFiEvents.sol";
 contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
     /// @dev Factory contract address - immutable to prevent unauthorized modifications
     address public immutable factory;
-    
+
     /// @dev Mapping of approved lending markets that can report borrower activity
     mapping(address => bool) public approvedMarkets;
-    
+
     /// @dev Complete borrowing history and current reputation score for each borrower
     mapping(address => BorrowerProfile) public borrowerProfiles;
-    
+
     /// @dev Quick lookup for whether a borrower has been registered in the system
     mapping(address => bool) public registeredBorrowers;
 

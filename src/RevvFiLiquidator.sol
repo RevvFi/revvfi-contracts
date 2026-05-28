@@ -15,7 +15,7 @@ import "./libraries/RevvFiEvents.sol";
  * @dev This contract is a singleton that manages liquidation auctions across all lending markets.
  *      When a borrower's position becomes undercollateralized, the market creates an auction
  *      to sell the seized collateral to the highest bidder.
- *      
+ *
  *      Dutch Auction Mechanism:
  *      - Auction starts with a price equal to the debt amount
  *      - Price decreases by 5% (500 bps) every hour
@@ -23,7 +23,7 @@ import "./libraries/RevvFiEvents.sol";
  *      - Reserve price is 80% of the debt amount (minimum acceptable bid)
  *      - Late bids extend the auction by 15 minutes
  *      - Auctions without bids are automatically retried
- *      
+ *
  *      Features:
  *      - Market authorization for creating auctions
  *      - Configurable auction parameters (duration, bid increments, extension window)
@@ -36,46 +36,46 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
     // ============================================================
     //                    Immutable References
     // ============================================================
-    
+
     /// @dev Factory contract that deployed this liquidator (immutable for security)
     address public immutable factory;
 
     // ============================================================
     //                    Auction State
     // ============================================================
-    
+
     /// @dev Mapping from auction ID to auction details
     mapping(uint256 => Auction) public auctions;
-    
+
     /// @dev Markets authorized to create auctions (set by factory)
     mapping(address => bool) public approvedMarkets;
-    
+
     /// @dev Next available auction ID (auto-increments)
     uint256 public nextAuctionId;
 
     // ============================================================
     //                    Auction Parameters
     // ============================================================
-    
+
     /// @dev Duration of each auction in seconds (default: 3 days)
     uint256 public auctionDuration = 3 days;
-    
+
     /// @dev Minimum bid increment in basis points (default: 1% = 100 bps)
     uint256 public minBidIncrementBps = 100;
-    
+
     /// @dev Time added to auction when a late bid is placed (default: 15 minutes)
     uint256 public auctionExtensionWindow = 15 minutes;
-    
+
     /// @dev Time between price decreases in Dutch auction (default: 1 hour)
     uint256 public dutchAuctionStepDuration = 1 hours;
-    
+
     /// @dev Price decrease per step in basis points (default: 5% = 500 bps)
     uint256 public dutchAuctionPriceDecrementBps = 500;
 
     // ============================================================
     //                    Modifiers
     // ============================================================
-    
+
     /// @dev Restricts function calls to the factory contract only
     modifier onlyFactory() {
         if (msg.sender != factory) revert RevvFiErrors.UnauthorizedCaller();
@@ -132,7 +132,7 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
         uint256 debtAmount
     ) public onlyApprovedMarket returns (uint256 auctionId) {
         auctionId = nextAuctionId++;
-        
+
         // Set reserve price at 80% to ensure minimum recovery
         uint256 reservePrice = (debtAmount * 80) / 100;
 
@@ -296,7 +296,7 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
      */
     function _retryAuction(uint256 oldAuctionId) internal {
         Auction storage oldAuction = auctions[oldAuctionId];
-        
+
         uint256 newAuctionId = createAuction(
             oldAuction.market,
             oldAuction.borrower,
@@ -305,10 +305,10 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
             oldAuction.collateralAmount,
             oldAuction.debtAmount
         );
-        
+
         // Mark old auction as inactive
         oldAuction.active = false;
-        
+
         emit RevvFiEvents.AuctionCancelled(oldAuctionId);
     }
 
@@ -335,7 +335,7 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
     // ============================================================
     //                    View Functions
     // ============================================================
-    
+
     /**
      * @dev Returns complete auction details
      * @param auctionId ID of the auction
@@ -364,7 +364,7 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
     // ============================================================
     //                    Configuration Functions
     // ============================================================
-    
+
     /**
      * @dev Updates auction duration (factory only)
      * @param newDuration New duration in seconds

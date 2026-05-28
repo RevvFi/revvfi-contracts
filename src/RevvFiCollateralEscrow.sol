@@ -27,55 +27,55 @@ contract RevvFiCollateralEscrow is ReentrancyGuard, Initializable, IRevvFiCollat
 
     /// @notice Basis points denominator (100% = 10000)
     uint256 public constant BP = 10000;
-    
+
     /// @dev Default minimum collateral ratio (100%) used when not explicitly set
     uint256 private constant DEFAULT_MIN_CR = 10000;
-    
+
     /// @dev Default liquidation threshold (95%) used when not explicitly set
     uint256 private constant DEFAULT_LIQ_THRESHOLD = 9500;
-    
+
     /// @dev Maximum age of oracle price data before considering it stale (2 hours)
     uint256 private constant STALE_PRICE = 2 hours;
 
     /// @dev Factory contract that deployed this escrow (immutable reference)
     address public factory;
-    
+
     /// @dev The lending market contract that controls this escrow
     address public market;
-    
+
     /// @dev The borrower whose collateral is held in this escrow
     address public borrower;
-    
+
     /// @dev Token being borrowed (e.g., USDC) - used for debt calculations
     address public borrowAsset;
-    
+
     /// @dev Token used as collateral (e.g., WETH) - held in this contract
     address public collateralAsset;
-    
+
     /// @dev Chainlink oracle address for collateral asset price feed
     address public collateralOracle;
 
     /// @dev Number of decimals in the oracle price data (e.g., 8 for Chainlink ETH/USD)
     uint8 public collateralOracleDecimals;
-    
+
     /// @dev Number of decimals for the collateral token (e.g., 18 for WETH)
     uint8 public collateralDecimals;
-    
+
     /// @dev Number of decimals for the borrow token (e.g., 6 for USDC)
     uint8 public borrowDecimals;
 
     /// @dev Amount of collateral deposited by each borrower
     mapping(address => uint256) public collateralBalance;
-    
+
     /// @dev Total collateral held across all borrowers in this escrow
     uint256 public totalCollateral;
-    
+
     /// @dev Minimum collateral ratio required to avoid liquidation (in basis points)
     uint256 public minCollateralRatio;
-    
+
     /// @dev Threshold below which a position can be liquidated (in basis points)
     uint256 public liquidationThreshold;
-    
+
     /// @dev Flag indicating whether liquidation is currently in progress
     bool public liquidationActive;
 

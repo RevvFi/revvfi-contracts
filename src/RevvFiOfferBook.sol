@@ -54,36 +54,36 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
     }
 
     // Protocol constants
-    uint256 public constant MAX_OFFERS_PER_LENDER = 20;      // Maximum active offers per lender
-    uint256 public constant MAX_ACTIVE_OFFERS = 500;        // Global maximum active offers
-    uint256 private constant MIN_OFFER = 100e6;             // Minimum offer amount (100 USDC with 6 decimals)
-    uint256 private constant MAX_OFFERS_TO_MATCH = 50;      // Limit matching to prevent gas explosion
+    uint256 public constant MAX_OFFERS_PER_LENDER = 20; // Maximum active offers per lender
+    uint256 public constant MAX_ACTIVE_OFFERS = 500; // Global maximum active offers
+    uint256 private constant MIN_OFFER = 100e6; // Minimum offer amount (100 USDC with 6 decimals)
+    uint256 private constant MAX_OFFERS_TO_MATCH = 50; // Limit matching to prevent gas explosion
 
     // Core addresses
-    address public factory;         // Factory contract that created this offer book
-    address public market;          // Associated market contract
-    address public borrowAsset;     // Asset token being lent/borrowed
+    address public factory; // Factory contract that created this offer book
+    address public market; // Associated market contract
+    address public borrowAsset; // Asset token being lent/borrowed
 
     // Offer storage
-    mapping(uint256 => Offer) public offers;                // Offer ID => Offer details
-    mapping(address => uint256[]) public lenderOfferIds;    // Lender address => Array of offer IDs
-    mapping(uint256 => bool) public isActiveOffer;          // Offer ID => Active status
+    mapping(uint256 => Offer) public offers; // Offer ID => Offer details
+    mapping(address => uint256[]) public lenderOfferIds; // Lender address => Array of offer IDs
+    mapping(uint256 => bool) public isActiveOffer; // Offer ID => Active status
 
     // Offer ID management
-    uint256 public nextOfferId;         // Next available offer ID
-    uint256 public totalLiquidity;      // Total available liquidity across all active offers
-    uint256 public activeOfferCount;    // Number of active offers
+    uint256 public nextOfferId; // Next available offer ID
+    uint256 public totalLiquidity; // Total available liquidity across all active offers
+    uint256 public activeOfferCount; // Number of active offers
 
     // Active offers array with index mapping for O(1) removal
-    uint256[] private _activeIds;                       // List of active offer IDs
-    mapping(uint256 => uint256) private _activeIndex;   // Offer ID => Index in _activeIds
+    uint256[] private _activeIds; // List of active offer IDs
+    mapping(uint256 => uint256) private _activeIndex; // Offer ID => Index in _activeIds
 
     // FIXED: APR buckets for efficient matching
-    mapping(uint256 => APRBucket) public aprBuckets;    // Bucket ID => Bucket details
-    uint256[] public aprValues;                         // List of bucket IDs with active offers
-    mapping(uint256 => uint256) public aprToIndex;      // Bucket ID => Index in aprValues array
-    uint256 public constant APR_STEP = 100;             // APR step size (1% = 100 basis points)
-    
+    mapping(uint256 => APRBucket) public aprBuckets; // Bucket ID => Bucket details
+    uint256[] public aprValues; // List of bucket IDs with active offers
+    mapping(uint256 => uint256) public aprToIndex; // Bucket ID => Index in aprValues array
+    uint256 public constant APR_STEP = 100; // APR step size (1% = 100 basis points)
+
     // FIXED: Track which offers are in which buckets to prevent duplication
     mapping(uint256 => uint256) public offerInBucketId; // Offer ID => Bucket ID (0 means not in any bucket)
 
@@ -169,7 +169,7 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
             aprToIndex[bucketId] = aprValues.length;
             aprValues.push(bucketId);
         }
-        
+
         // Add offer to bucket
         aprBuckets[bucketId].offerIds.push(offerId);
         aprBuckets[bucketId].totalLiquidity += offers[offerId].remainingAmount;

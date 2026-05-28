@@ -64,21 +64,21 @@ contract RevvFiLiquidityQueue is ReentrancyGuard, Initializable {
         uint256[] requestIds;
     }
 
-    address public market;                     // Market contract address authorized to interact
-    address public factory;                    // Factory contract address for epoch processing
-    IRevvFiPositionNFT public positionNFT;     // NFT contract for position ownership verification
+    address public market; // Market contract address authorized to interact
+    address public factory; // Factory contract address for epoch processing
+    IRevvFiPositionNFT public positionNFT; // NFT contract for position ownership verification
 
-    uint256 public constant EPOCH_DURATION = 7 days;      // Duration of each epoch
+    uint256 public constant EPOCH_DURATION = 7 days; // Duration of each epoch
     uint256 public constant MAX_REQUESTS_PER_EPOCH = 500; // Maximum withdrawal requests per epoch
 
     mapping(uint256 => WithdrawalRequest) public withdrawalRequests; // Request ID => Request details
-    mapping(uint256 => Epoch) public epochs;                         // Epoch number => Epoch details
-    mapping(address => uint256[]) public lenderRequests;             // Lender address => Array of request IDs
-    mapping(uint256 => bool) public positionWithdrawalLocked;        // Position ID => Lock status
+    mapping(uint256 => Epoch) public epochs; // Epoch number => Epoch details
+    mapping(address => uint256[]) public lenderRequests; // Lender address => Array of request IDs
+    mapping(uint256 => bool) public positionWithdrawalLocked; // Position ID => Lock status
 
-    uint256 public nextRequestId;    // Next available request ID
-    uint256 public currentEpoch;     // Current active epoch number
-    uint256 public epochStartTime;   // Start time of the current epoch
+    uint256 public nextRequestId; // Next available request ID
+    uint256 public currentEpoch; // Current active epoch number
+    uint256 public epochStartTime; // Start time of the current epoch
 
     /**
      * @dev Modifier to restrict access to market contract only

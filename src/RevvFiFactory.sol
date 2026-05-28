@@ -23,7 +23,7 @@ import "./libraries/RevvFiEvents.sol";
  * @dev This contract serves as the deployment hub for the entire RevvFi protocol.
  *      It uses the clone pattern (EIP-1167) to deploy minimal proxy contracts for each market,
  *      significantly reducing deployment gas costs compared to deploying full contracts.
- *      
+ *
  *      Key features:
  *      - Deploys per-market clones of Market, Escrow, OfferBook, and LiquidityQueue
  *      - Maintains protocol-wide singleton contracts (ArchController, PositionNFT, Liquidator, ReputationRegistry)
@@ -37,74 +37,74 @@ contract RevvFiFactory is Ownable, ReentrancyGuard {
     // ============================================================
     //                    Core Protocol Contracts
     // ============================================================
-    
+
     /// @dev Central registry for permissions and whitelists (set once by owner)
     IRevvFiArchController public archController;
-    
+
     /// @dev NFT contract representing lender positions (set once by owner)
     IRevvFiPositionNFT public positionNFT;
-    
+
     /// @dev Contract handling liquidation auctions (set once by owner)
     IRevvFiLiquidator public liquidator;
-    
+
     /// @dev Contract tracking borrower reputation (set once by owner)
     IReputationRegistry public reputationRegistry;
-    
+
     /// @dev Flag indicating whether core contracts have been set (prevents double initialization)
     bool public coreContractsSet;
 
     // ============================================================
     //                    Implementation Contracts
     // ============================================================
-    
+
     /// @dev Implementation address for Market contracts (cloned per market)
     address public immutable marketImpl;
-    
+
     /// @dev Implementation address for CollateralEscrow contracts (cloned per market)
     address public immutable escrowImpl;
-    
+
     /// @dev Implementation address for OfferBook contracts (cloned per market)
     address public immutable offerBookImpl;
-    
+
     /// @dev Implementation address for LiquidityQueue contracts (cloned per market)
     address public immutable liquidityQueueImpl;
 
     // ============================================================
     //                    Configuration
     // ============================================================
-    
+
     /// @dev Fee charged for deploying a new market (in wei/ETH)
     uint256 public deploymentFee;
-    
+
     /// @dev Address that receives deployment fees
     address public feeRecipient;
-    
+
     /// @dev Pending ArchController address for timelock-protected update
     address public pendingArchController;
-    
+
     /// @dev Timestamp when the pending ArchController update can be executed
     uint256 public archControllerUpdateTimelock;
 
     // ============================================================
     //                    Protocol Guardrails
     // ============================================================
-    
+
     /// @dev Timelock duration for ArchController updates (2 days)
     uint256 private constant TIMELOCK = 2 days;
-    
+
     /// @dev Minimum allowed collateral ratio (110%) - prevents undercollateralized positions
     uint256 private constant MIN_CR = 11000;
-    
+
     /// @dev Maximum allowed collateral ratio (500%) - prevents over-collateralization abuse
     uint256 private constant MAX_CR = 50000;
-    
+
     /// @dev Minimum buffer between collateral ratio and liquidation threshold (5%)
     uint256 private constant LIQ_BUFFER = 500;
 
     // ============================================================
     //                    Events
     // ============================================================
-    
+
     event CoreContractsSet(address archController, address positionNFT, address liquidator, address reputationRegistry);
     event ImplementationsSet(address market, address escrow, address offerBook, address liquidityQueue);
 
