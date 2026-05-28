@@ -10,26 +10,35 @@ import "./libraries/RevvFiEvents.sol";
  * @title RevvFiArchController
  * @author Preet Singh
  * @notice Central registry and permission manager for the entire RevvFi protocol
- * @dev Maintains whitelists for borrowers, markets, controllers, and blacklisted assets
+ * @dev This contract serves as the single source of truth for all protocol permissions.
+ *      It maintains whitelists and blacklists for:
+ *      - Borrowers: Accounts authorized to create lending markets
+ *      - Markets: Deployed lending pools
+ *      - Controllers: Privileged contracts that can register markets
+ *      - Controller Factories: Contracts authorized to deploy controllers
+ *      - Asset Blacklist: Tokens prohibited from use in the protocol
  */
 contract RevvFiArchController is Ownable {
     using EnumerableSet for EnumerableSet.AddressSet;
 
-    /// @dev All registered lending markets (pools)
+    /// @dev Set of all registered lending markets (pools) in the protocol
     EnumerableSet.AddressSet internal _markets;
 
-    /// @dev Factories that can deploy protocol components
+    /// @dev Set of factory contracts authorized to deploy protocol controllers
     EnumerableSet.AddressSet internal _controllerFactories;
 
-    /// @dev Approved borrowers who can create lending markets
+    /// @dev Set of approved borrowers who can create and manage lending markets
     EnumerableSet.AddressSet internal _borrowers;
 
-    /// @dev Registered controller contracts (factories and other privileged contracts)
+    /// @dev Set of registered controller contracts (factories and other privileged contracts)
     EnumerableSet.AddressSet internal _controllers;
 
-    /// @dev Assets that are prohibited from use in the protocol
+    /// @dev Set of asset addresses that are blacklisted and cannot be used in the protocol
     EnumerableSet.AddressSet internal _assetBlacklist;
 
+    /**
+     * @dev Initializes the ArchController with the contract deployer as the initial owner
+     */
     constructor() Ownable(msg.sender) {}
 
     // ============================================================
@@ -39,6 +48,8 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Adds a new borrower to the approved list
      * @param borrower Address to register as a borrower
+     * @notice Only callable by the contract owner
+     * @dev Borrowers must be registered before they can deploy lending markets
      */
     function registerBorrower(address borrower) external onlyOwner {
         if (borrower == address(0)) revert RevvFiErrors.ZeroAddressNotAllowed();
@@ -49,6 +60,8 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Removes a borrower from the approved list
      * @param borrower Address to remove
+     * @notice Only callable by the contract owner
+     * @dev Removed borrowers cannot deploy new markets but existing markets remain operational
      */
     function removeBorrower(address borrower) external onlyOwner {
         if (!_borrowers.remove(borrower)) revert RevvFiErrors.BorrowerDoesNotExist();
@@ -67,6 +80,7 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Returns all registered borrowers
      * @return Array of borrower addresses
+     * @dev Use paginated version for large lists to avoid gas limits
      */
     function getRegisteredBorrowers() external view returns (address[] memory) {
         return _borrowers.values();
@@ -74,9 +88,10 @@ contract RevvFiArchController is Ownable {
 
     /**
      * @dev Returns a paginated list of registered borrowers
-     * @param start Starting index
+     * @param start Starting index (inclusive)
      * @param end Ending index (exclusive)
      * @return arr Array of borrower addresses in the specified range
+     * @dev Useful for building UIs that need to paginate through large lists
      */
     function getRegisteredBorrowers(uint256 start, uint256 end) external view returns (address[] memory arr) {
         uint256 len = _borrowers.length();
@@ -106,6 +121,8 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Adds an asset to the blacklist, preventing its use in the protocol
      * @param asset Address of token to blacklist
+     * @notice Only callable by the contract owner
+     * @dev Blacklisted assets cannot be used as borrow or collateral assets
      */
     function addBlacklist(address asset) external onlyOwner {
         if (asset == address(0)) revert RevvFiErrors.ZeroAddressNotAllowed();
@@ -116,6 +133,7 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Removes an asset from the blacklist
      * @param asset Address of token to permit
+     * @notice Only callable by the contract owner
      */
     function removeBlacklist(address asset) external onlyOwner {
         if (!_assetBlacklist.remove(asset)) revert RevvFiErrors.AssetNotBlacklisted();
@@ -173,6 +191,9 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Registers a factory that can deploy protocol controllers
      * @param factory Address of factory contract to register
+     * @notice Can be called by owner OR by the factory itself if not already registered
+     * @dev This self-registration pattern allows factories to register themselves
+     *      while maintaining security through ownership check
      */
     function registerControllerFactory(address factory) external {
         if (msg.sender != owner() && (msg.sender != factory || _controllerFactories.contains(factory))) {
@@ -186,6 +207,7 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Removes a controller factory from the registry
      * @param factory Address of factory to remove
+     * @notice Only callable by the contract owner
      */
     function removeControllerFactory(address factory) external onlyOwner {
         if (!_controllerFactories.remove(factory)) revert RevvFiErrors.ControllerFactoryDoesNotExist();
@@ -249,6 +271,8 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Registers a controller contract (only callable by a registered factory)
      * @param controller Address of controller to register
+     * @notice This creates the controller role that can register markets
+     * @dev Controllers are privileged contracts that can register lending markets
      */
     function registerController(address controller) external onlyControllerFactory {
         if (controller == address(0)) revert RevvFiErrors.ZeroAddressNotAllowed();
@@ -259,6 +283,7 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Removes a controller from the registry
      * @param controller Address of controller to remove
+     * @notice Only callable by the contract owner
      */
     function removeController(address controller) external onlyOwner {
         if (!_controllers.remove(controller)) revert RevvFiErrors.ControllerDoesNotExist();
@@ -322,6 +347,8 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Registers a lending market (only callable by a registered controller)
      * @param market Address of lending market to register
+     * @notice Markets must be registered before they can participate in the protocol
+     * @dev Registration is performed by the factory after market deployment
      */
     function registerMarket(address market) external onlyController {
         if (market == address(0)) revert RevvFiErrors.ZeroAddressNotAllowed();
@@ -332,6 +359,8 @@ contract RevvFiArchController is Ownable {
     /**
      * @dev Removes a lending market from the registry
      * @param market Address of market to remove
+     * @notice Only callable by the contract owner
+     * @dev Useful for cleaning up after market closure
      */
     function removeMarket(address market) external onlyOwner {
         if (!_markets.remove(market)) revert RevvFiErrors.MarketDoesNotExist();

@@ -7,17 +7,40 @@ import "./interfaces/IReputationRegistry.sol";
 import "./libraries/RevvFiErrors.sol";
 import "./libraries/RevvFiEvents.sol";
 
+/**
+ * @title ReputationRegistry
+ * @author Preet Singh
+ * @notice Manages borrower reputation scores based on loan performance history
+ * @dev Tracks borrower behavior including total borrowed, repaid, successful loans, and defaults.
+ *      Reputation scores range from 0-1000, with 500 being the starting score for new borrowers.
+ *      The score increases with successful repayments and decreases with defaults.
+ *      This contract is a singleton that serves the entire protocol.
+ */
 contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
+    /// @dev Factory contract address - immutable to prevent unauthorized modifications
     address public immutable factory;
+    
+    /// @dev Mapping of approved lending markets that can report borrower activity
     mapping(address => bool) public approvedMarkets;
+    
+    /// @dev Complete borrowing history and current reputation score for each borrower
     mapping(address => BorrowerProfile) public borrowerProfiles;
+    
+    /// @dev Quick lookup for whether a borrower has been registered in the system
     mapping(address => bool) public registeredBorrowers;
 
+    /**
+     * @dev Restricts function execution to the factory contract only
+     */
     modifier onlyFactory() {
         if (msg.sender != factory) revert RevvFiErrors.UnauthorizedCaller();
         _;
     }
 
+    /**
+     * @dev Restricts function execution to approved lending markets
+     *      Allows the factory to bypass the approved markets check
+     */
     modifier onlyApprovedMarket() {
         if (!approvedMarkets[msg.sender] && msg.sender != factory) {
             revert RevvFiErrors.UnauthorizedCaller();
@@ -25,16 +48,31 @@ contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
         _;
     }
 
+    /**
+     * @dev Initializes the reputation registry with the factory address
+     * @param _factory Address of the RevvFiFactory that will manage this registry
+     */
     constructor(address _factory) Ownable(msg.sender) {
         if (_factory == address(0)) revert RevvFiErrors.ZeroAddress();
         factory = _factory;
     }
 
+    /**
+     * @dev Authorizes a lending market to report borrower activity
+     * @param market Address of the lending market to approve
+     * @notice Only callable by the factory contract
+     */
     function registerMarket(address market) external onlyFactory {
         if (market == address(0)) revert RevvFiErrors.ZeroAddress();
         approvedMarkets[market] = true;
     }
 
+    /**
+     * @dev Creates a new borrower profile with starting reputation of 500
+     * @param borrower Address of the borrower to register
+     * @notice Only callable by the factory contract
+     * @dev Reverts if borrower is already registered
+     */
     function registerBorrower(address borrower) external onlyFactory {
         if (borrower == address(0)) revert RevvFiErrors.ZeroAddress();
         if (registeredBorrowers[borrower]) revert RevvFiErrors.BorrowerAlreadyExists();
@@ -53,6 +91,12 @@ contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
         emit RevvFiEvents.BorrowerRegistered(borrower);
     }
 
+    /**
+     * @dev Updates borrower's total borrowed amount when they take a loan
+     * @param borrower Address of the borrower
+     * @param borrowAmount Amount borrowed in this transaction
+     * @notice Only callable by approved lending markets
+     */
     function recordBorrowActivity(address borrower, uint256 borrowAmount) external onlyApprovedMarket {
         if (!registeredBorrowers[borrower]) revert RevvFiErrors.BorrowerNotRegistered();
 
@@ -63,6 +107,13 @@ contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
         emit RevvFiEvents.BorrowActivityRecorded(borrower, borrowAmount);
     }
 
+    /**
+     * @dev Updates borrower's repayment history and recalculates reputation score
+     * @param borrower Address of the borrower
+     * @param repaidAmount Amount successfully repaid
+     * @notice Only callable by approved lending markets
+     * @dev Increases successful loans count and recalculates reputation score
+     */
     function recordSuccessfulRepayment(address borrower, uint256 repaidAmount) external onlyApprovedMarket {
         if (!registeredBorrowers[borrower]) revert RevvFiErrors.BorrowerNotRegistered();
 
@@ -78,6 +129,14 @@ contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
         emit RevvFiEvents.ReputationScoreUpdated(borrower, oldScore, profile.reputationScore);
     }
 
+    /**
+     * @dev Records a loan default and penalizes the borrower's reputation
+     * @param borrower Address of the borrower who defaulted
+     * @param originalDebt Total amount that was owed
+     * @param recoveredAmount Amount recovered through liquidation
+     * @notice Only callable by approved lending markets
+     * @dev Increases default count and recalculates reputation score
+     */
     function recordDefault(address borrower, uint256 originalDebt, uint256 recoveredAmount)
         external
         onlyApprovedMarket
@@ -96,6 +155,14 @@ contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
         emit RevvFiEvents.ReputationScoreUpdated(borrower, oldScore, profile.reputationScore);
     }
 
+    /**
+     * @dev Calculates reputation score based on loan success rate and default penalties
+     * @param profile Storage reference to borrower's profile
+     * @return Calculated reputation score between 0 and 1000
+     * @dev Formula: (successfulLoans * 1000 / totalLoans) - (defaultedLoans * 50)
+     *      Each successful loan increases score proportionally to success rate
+     *      Each default reduces score by 50 points
+     */
     function _calculateReputationScore(BorrowerProfile storage profile) internal view returns (uint256) {
         uint256 totalLoans = profile.successfulLoans + profile.defaultedLoans;
         if (totalLoans == 0) return 500;
@@ -109,11 +176,29 @@ contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
         return uint256(score);
     }
 
+    /**
+     * @dev Returns complete borrowing profile for a borrower
+     * @param borrower Address to query
+     * @return BorrowerProfile struct containing all history and current score
+     * @dev Reverts if borrower is not registered
+     */
     function getBorrowerProfile(address borrower) external view returns (BorrowerProfile memory) {
         if (!registeredBorrowers[borrower]) revert RevvFiErrors.BorrowerNotRegistered();
         return borrowerProfiles[borrower];
     }
 
+    /**
+     * @dev Converts numerical reputation score to letter risk rating
+     * @param borrower Address to evaluate
+     * @return RiskLabel from AAA (best) to D (worst), UNRATED for unregistered
+     * @dev Risk mapping:
+     *      AAA: 900-1000 (Excellent)
+     *      AA:  800-899  (Very Good)
+     *      A:   700-799  (Good)
+     *      B:   500-699  (Fair)
+     *      C:   300-499  (Poor)
+     *      D:   0-299    (Default)
+     */
     function getRiskLabel(address borrower) external view returns (RiskLabel) {
         if (!registeredBorrowers[borrower]) return RiskLabel.UNRATED;
         uint256 score = borrowerProfiles[borrower].reputationScore;
@@ -126,11 +211,21 @@ contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
         return RiskLabel.D;
     }
 
+    /**
+     * @dev Returns just the numerical reputation score
+     * @param borrower Address to query
+     * @return Reputation score (0-1000) or 0 if borrower not registered
+     */
     function getReputationScore(address borrower) external view returns (uint256) {
         if (!registeredBorrowers[borrower]) return 0;
         return borrowerProfiles[borrower].reputationScore;
     }
 
+    /**
+     * @dev Checks if a borrower has been registered in the system
+     * @param borrower Address to check
+     * @return True if borrower is registered, false otherwise
+     */
     function isBorrowerRegistered(address borrower) external view returns (bool) {
         return registeredBorrowers[borrower];
     }
