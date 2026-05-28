@@ -49,45 +49,30 @@ contract EdgeCaseIntegrationTest is Test {
         vm.deal(owner, DEPLOYMENT_FEE);
         vm.startPrank(owner);
 
-        // Deploy tokens and oracle
         usdc = new MockERC20("USD Coin", "USDC", 6);
         weth = new MockERC20("Wrapped Ether", "WETH", 18);
         oracle = new MockOracle(8, 2000e8);
 
-        // Deploy implementation contracts (for cloning)
         address marketImpl = address(new RevvFiMarket());
         address escrowImpl = address(new RevvFiCollateralEscrow());
         address offerBookImpl = address(new RevvFiOfferBook());
         address liquidityQueueImpl = address(new RevvFiLiquidityQueue());
 
-        // Deploy Factory FIRST (without core contracts)
-        factory = new RevvFiFactory(
-            owner, // feeRecipient
-            DEPLOYMENT_FEE, // deploymentFee
-            marketImpl, // marketImpl
-            escrowImpl, // escrowImpl
-            offerBookImpl, // offerBookImpl
-            liquidityQueueImpl // liquidityQueueImpl
-        );
+        factory = new RevvFiFactory(owner, DEPLOYMENT_FEE, marketImpl, escrowImpl, offerBookImpl, liquidityQueueImpl);
 
-        // Deploy ArchController
         archController = new RevvFiArchController();
         archController.registerBorrower(borrower);
 
-        // Deploy core contracts with factory address (no setFactory needed - they take factory in constructor)
         positionNFT = IRevvFiPositionNFT(address(new RevvFiPositionNFT(address(factory))));
         liquidator = IRevvFiLiquidator(address(new RevvFiLiquidator(address(factory))));
         reputationRegistry = IReputationRegistry(address(new ReputationRegistry(address(factory))));
 
-        // Set core contracts in Factory (onlyOwner)
         factory.setCoreContracts(
             address(archController), address(positionNFT), address(liquidator), address(reputationRegistry)
         );
 
-        // Register factory with ArchController
         factory.registerWithArchController();
 
-        // Deploy market
         address marketAddr = factory.deployMarket{value: DEPLOYMENT_FEE}(
             borrower, address(usdc), address(weth), address(oracle), 18, 6, MIN_COLLATERAL_RATIO, LIQUIDATION_THRESHOLD
         );
@@ -101,7 +86,6 @@ contract EdgeCaseIntegrationTest is Test {
 
         vm.stopPrank();
 
-        // Fund and approve for lender
         vm.deal(borrower, 100 ether);
         vm.startPrank(lender);
         usdc.mint(lender, 50000e6);
@@ -288,9 +272,6 @@ contract EdgeCaseIntegrationTest is Test {
         _logMarketState("AFTER PRICE UPDATE");
     }
 
-    // ============================================================
-    // TEST 1: Partial Repayment (20%, 50%, remaining)
-    // ============================================================
     function test_PartialRepayment() public {
         _snapshot("TEST START");
 
@@ -349,9 +330,6 @@ contract EdgeCaseIntegrationTest is Test {
         emit log_named_uint("Final Reputation Score", reputation);
     }
 
-    // ============================================================
-    // TEST 2: Collateral Top Up
-    // ============================================================
     function test_CollateralTopUp() public {
         _snapshot("TEST START");
 
@@ -401,9 +379,6 @@ contract EdgeCaseIntegrationTest is Test {
         emit log_named_uint("New Total Collateral", newCollateral / 1e18);
     }
 
-    // ============================================================
-    // TEST 3: Liquidation Recovery
-    // ============================================================
     function test_LiquidationRecovery() public {
         _snapshot("TEST START");
 
@@ -462,9 +437,6 @@ contract EdgeCaseIntegrationTest is Test {
         emit log_named_uint("Recovered Ratio (bps)", recoveredRatio);
     }
 
-    // ============================================================
-    // TEST 4: Multiple Borrows with Different APRs
-    // ============================================================
     function test_MultipleBorrowsDifferentAPRs() public {
         _snapshot("TEST START");
 
@@ -505,9 +477,6 @@ contract EdgeCaseIntegrationTest is Test {
         emit log("=== Multiple Borrows Different APRs Test Passed ===");
     }
 
-    // ============================================================
-    // TEST 5: Reputation Registry Integration
-    // ============================================================
     function test_ReputationRegistryIntegration() public {
         assertTrue(reputationRegistry.isBorrowerRegistered(borrower));
         assertEq(reputationRegistry.getReputationScore(borrower), 500);
@@ -532,9 +501,6 @@ contract EdgeCaseIntegrationTest is Test {
         emit log_named_uint("Final Reputation Score", finalScore);
     }
 
-    // ============================================================
-    // TEST 6: Verify Interest Accrual Works Correctly
-    // ============================================================
     function test_InterestAccrualWorks() public {
         vm.prank(lender);
         offerBook.submitOffer(BORROW_AMOUNT, APR, 0, 30 days);
@@ -542,31 +508,59 @@ contract EdgeCaseIntegrationTest is Test {
         _depositCollateral(COLLATERAL_AMOUNT);
         _borrow(BORROW_AMOUNT);
 
-        uint256 positionId = 1;
+        // Get the position ID from the lender's positions
+        uint256[] memory lenderPositionsArr = positionNFT.getLenderPositions(lender);
+        assertEq(lenderPositionsArr.length, 1, "Should have exactly one position");
+        uint256 positionId = lenderPositionsArr[0];
 
-        assertEq(market.positionAccruedInterest(positionId), 0);
-        assertEq(market.getTotalOwed(), BORROW_AMOUNT);
+        uint256 initialDebt = market.getTotalOwed();
+        assertEq(initialDebt, BORROW_AMOUNT, "Initial debt mismatch");
 
+        // Warp time and accrue interest WITHOUT creating claimable amounts
         vm.warp(block.timestamp + 30 days);
         vm.prank(owner);
         oracle.setFresh(int256(_getCurrentPrice()));
 
+        // Trigger interest accrual via a no-op that doesn't create claimable amounts
+        // Instead of repay(1), we can call a view function that triggers the internal accrual
+        // But the only way to trigger _accrueInterest is through state-changing functions
+        // So we call a minimal state change that doesn't create claimable amounts
         vm.startPrank(borrower);
         usdc.mint(borrower, 1);
         usdc.approve(address(market), 1);
+
+        // Store claimable amount before
+        uint256 claimableBefore = market.getPositionClaimable(positionId);
+
         market.repay(1);
+
         vm.stopPrank();
 
-        uint256 accruedInterest = market.positionAccruedInterest(positionId);
-        assertGt(accruedInterest, 0);
+        // Verify no claimable amount was created (the 1 wei should have gone to interest or principal)
+        // If interest was 0, the 1 wei would be claimable. But interest should be > 0 after 30 days
+        uint256 finalDebt = market.getTotalOwed();
 
+        // Expected debt after 30 days of interest
         uint256 expectedInterest = (BORROW_AMOUNT * APR * 30 days) / (365 days * 10000);
-        assertApproxEqAbs(accruedInterest, expectedInterest, 100);
 
-        assertApproxEqAbs(market.getTotalOwed(), BORROW_AMOUNT + expectedInterest, 100);
+        // Due to the 1 wei repayment, debt should be (initial + interest - 1) or (initial + interest) - 1
+        // But since we're dealing with large numbers, the difference is negligible
+        assertApproxEqAbs(finalDebt, BORROW_AMOUNT + expectedInterest - 1, 100, "Interest calculation incorrect");
+
+        // The position value should reflect the interest accrued
+        uint256 positionValue = market.getPositionValue(positionId);
+        assertApproxEqAbs(positionValue, BORROW_AMOUNT + expectedInterest - 1, 100, "Position value mismatch");
+
+        // The claimable amount should be 0 (the 1 wei repayment should have gone to interest)
+        // But due to rounding, it might be 0 or 1 depending on interest calculation
+        uint256 claimableAfter = market.getPositionClaimable(positionId);
+        assertTrue(claimableAfter <= 1, "Claimable amount should be 0 or 1 due to rounding");
 
         emit log("=== Interest Accrual Test Passed ===");
-        emit log_named_uint("Accrued Interest (USDC units)", accruedInterest);
-        emit log_named_uint("Expected Interest (USDC units)", expectedInterest);
+        emit log_named_uint("Initial Debt (USDC)", initialDebt / 1e6);
+        emit log_named_uint("Final Debt (USDC)", finalDebt / 1e6);
+        emit log_named_uint("Expected Interest (USDC)", expectedInterest / 1e6);
+        emit log_named_uint("Position Value (USDC)", positionValue / 1e6);
+        emit log_named_uint("Claimable Amount", claimableAfter);
     }
 }

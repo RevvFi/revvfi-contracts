@@ -49,14 +49,14 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
 
     uint256[] private _activeIds;
     mapping(uint256 => uint256) private _activeIndex;
-    
+
     // FIXED: APR buckets for efficient matching
     mapping(uint256 => APRBucket) public aprBuckets;
     uint256[] public aprValues;
     mapping(uint256 => uint256) public aprToIndex;
     uint256 public constant APR_STEP = 100; // 1% steps
     // FIXED: Track which offers are in which buckets to prevent duplication
-    mapping(uint256 => uint256) public offerInBucketId;  // offerId -> bucketId (0 means not in any bucket)
+    mapping(uint256 => uint256) public offerInBucketId; // offerId -> bucketId (0 means not in any bucket)
 
     modifier onlyMarket() {
         if (msg.sender != market) revert RevvFiErrors.UnauthorizedCaller();
@@ -89,12 +89,12 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
 
     function _addToBucket(uint256 apr, uint256 offerId) internal {
         uint256 bucketId = _getBucketId(apr);
-        
+
         // FIXED: Prevent duplication - only add if not already in this bucket
         if (offerInBucketId[offerId] == bucketId) {
-            return;  // Already in this bucket
+            return; // Already in this bucket
         }
-        
+
         // If offer is in a different bucket, remove it first
         if (offerInBucketId[offerId] != 0) {
             uint256 oldBucketId = offerInBucketId[offerId];
@@ -108,7 +108,7 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
                 }
             }
         }
-        
+
         if (aprBuckets[bucketId].apr == 0) {
             aprBuckets[bucketId].apr = apr;
             aprToIndex[bucketId] = aprValues.length;
@@ -123,13 +123,12 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
         uint256 bucketId = _getBucketId(apr);
         APRBucket storage bucket = aprBuckets[bucketId];
         bucket.totalLiquidity -= amountRemoved;
-        
-        // FIXED: Clear bucket tracking
-        offerInBucketId[offerId] = 0;
-        
-        // Remove offer from bucket if fully filled
+
+        // Only clear bucket tracking when offer is fully removed
+        // If offer still has remaining amount, it stays in the bucket
         if (offers[offerId].remainingAmount == 0) {
-            // Find and remove from array (inefficient but happens less frequently)
+            // Fully removed - clear tracking and remove from array
+            offerInBucketId[offerId] = 0;
             for (uint256 i = 0; i < bucket.offerIds.length; i++) {
                 if (bucket.offerIds[i] == offerId) {
                     bucket.offerIds[i] = bucket.offerIds[bucket.offerIds.length - 1];
@@ -138,6 +137,8 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
                 }
             }
         }
+        // If offer still has remaining amount, it stays in the bucket with the same offerInBucketId
+        // This prevents the duplication bug on re-add
     }
 
     function _addActive(uint256 offerId) internal {
@@ -145,7 +146,7 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
         _activeIndex[offerId] = _activeIds.length;
         _activeIds.push(offerId);
         activeOfferCount++;
-        
+
         Offer storage offer = offers[offerId];
         _addToBucket(offer.apr, offerId);
     }
@@ -163,7 +164,7 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
         delete _activeIndex[offerId];
         isActiveOffer[offerId] = false;
         activeOfferCount--;
-        
+
         Offer storage offer = offers[offerId];
         _removeFromBucket(offer.apr, offerId, offer.remainingAmount);
     }
@@ -225,7 +226,7 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
 
         // Remove from old bucket
         _removeFromBucket(offer.apr, offerId, offer.remainingAmount);
-        
+
         uint256 newRemaining = newAmount - filledAmount;
         IERC20 token = IERC20(borrowAsset);
 
@@ -243,7 +244,7 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
         offer.remainingAmount = newRemaining;
         offer.apr = newApr;
         offer.expiry = block.timestamp + newDuration;
-        
+
         // Add to new bucket
         _addToBucket(newApr, offerId);
 
@@ -290,7 +291,7 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
         for (uint256 i = 0; i < aprValues.length; i++) {
             sortedAprs[i] = aprValues[i];
         }
-        
+
         // Simple sort for APRs (small number of APR buckets)
         for (uint256 i = 0; i < sortedAprs.length; i++) {
             for (uint256 j = i + 1; j < sortedAprs.length; j++) {
@@ -306,25 +307,25 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
         uint256 totalAprWeight = 0;
         uint256 selectedCount = 0;
         IRevvFiOfferBook.Offer[] memory tempBest = new IRevvFiOfferBook.Offer[](MAX_OFFERS_TO_MATCH);
-        
+
         uint256 offerIndex = 0;
-        
+
         for (uint256 b = 0; b < sortedAprs.length && remaining > 0 && offerIndex < MAX_OFFERS_TO_MATCH; b++) {
             uint256 bucketId = sortedAprs[b];
             APRBucket storage bucket = aprBuckets[bucketId];
-            
+
             for (uint256 i = 0; i < bucket.offerIds.length && remaining > 0 && offerIndex < MAX_OFFERS_TO_MATCH; i++) {
                 uint256 offerId = bucket.offerIds[i];
                 Offer storage offer = offers[offerId];
-                
+
                 if (!offer.active || offer.remainingAmount == 0 || offer.expiry <= block.timestamp) continue;
                 if (useSeniorOnly && offer.seniority != 0) continue;
-                
+
                 uint256 take = offer.remainingAmount < remaining ? offer.remainingAmount : remaining;
                 remaining -= take;
                 totalAvail += take;
                 totalAprWeight += take * offer.apr;
-                
+
                 tempBest[offerIndex] = IRevvFiOfferBook.Offer({
                     id: offer.id,
                     lender: offer.lender,
@@ -339,17 +340,17 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
                 offerIndex++;
             }
         }
-        
+
         if (remaining > 0) {
             return (new IRevvFiOfferBook.Offer[](0), 0, 0);
         }
-        
+
         weightedApr = totalAprWeight / amount;
         bestOffers = new IRevvFiOfferBook.Offer[](offerIndex);
         for (uint256 i = 0; i < offerIndex; i++) {
             bestOffers[i] = tempBest[i];
         }
-        
+
         return (bestOffers, amount, weightedApr);
     }
 
@@ -372,7 +373,7 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
 
             offer.remainingAmount -= take;
             totalLiquidity -= take;
-            
+
             // Update bucket
             _removeFromBucket(offer.apr, offer.id, take);
 

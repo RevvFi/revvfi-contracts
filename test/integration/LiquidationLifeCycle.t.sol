@@ -249,11 +249,6 @@ contract LiquidationLifecycleTest is Test {
         // Calculate steps needed to reach reserve price
         // Price decreases by 500 bps (5%) every hour
         // Starting price = debtAmount
-        // Need to find steps where debtAmount - (debtAmount * 500 * steps / 10000) <= reservePrice
-        // debtAmount * (1 - 0.05 * steps) <= 0.8 * debtAmount
-        // 1 - 0.05 * steps <= 0.8
-        // 0.2 <= 0.05 * steps
-        // steps >= 4
         uint256 stepsNeeded = 4;
         uint256 timeToWait = stepsNeeded * 1 hours;
         vm.warp(block.timestamp + timeToWait);
@@ -263,11 +258,9 @@ contract LiquidationLifecycleTest is Test {
         // Current price should be at or near reserve price
         assertApproxEqAbs(currentPrice, reservePrice, 1e6);
 
-        // Calculate minimum bid (reserve price or highest bid + increment)
-        // Since no bids yet, min bid = current price
+        // Place a bid at the current price
         uint256 minBid = currentPrice;
 
-        // Place a bid at the current price (not less)
         vm.prank(liquidatorAddress);
         usdc.approve(address(liquidator), minBid);
 

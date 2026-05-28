@@ -210,6 +210,7 @@ contract FullLoanLifecycleTest is Test {
         assertEq(reputation, 1000);
     }
 
+    // FIXED: Removed positionAccruedInterest reference
     function test_InterestAccruesCorrectly() public {
         vm.prank(lender1);
         offerBook.submitOffer(BORROW_AMOUNT, APR_1, 0, 30 days);
@@ -236,7 +237,15 @@ contract FullLoanLifecycleTest is Test {
         uint256[] memory positions = positionNFT.getLenderPositions(lender1);
         assertGt(positions.length, 0);
         uint256 positionId = positions[0];
-        assertGt(market.positionAccruedInterest(positionId), 0);
+
+        // FIXED: Use getPositionValue() instead of positionAccruedInterest
+        // Position value includes both principal and accrued interest
+        uint256 positionValue = market.getPositionValue(positionId);
+        assertGt(positionValue, BORROW_AMOUNT);
+
+        // The position value should be approximately equal to the total owed
+        // (since there's only one position)
+        assertApproxEqAbs(positionValue, totalOwed, 100);
     }
 
     function test_MultipleLendersDifferentAPRs() public {
