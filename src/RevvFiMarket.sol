@@ -16,59 +16,57 @@ import "./interfaces/IReputationRegistry.sol";
 import "./libraries/RevvFiErrors.sol";
 import "./libraries/RevvFiEvents.sol";
 
-// Protocol constants
-uint256 constant SECONDS_PER_YEAR = 365 days; // Seconds in a year for APR calculations
-uint256 constant DUST_THRESHOLD = 1e6; // Minimum debt threshold for cleanup (1 USDC dust)
+// Protocol-wide constants
+uint256 constant SECONDS_PER_YEAR = 365 days; // Seconds in a year for interest calculations
+uint256 constant DUST_THRESHOLD = 1e6; // Minimum debt threshold for cleanup (1e6 wei)
+uint256 constant SCALE = 1e18; // Scaling factor for fixed-point arithmetic
+uint256 constant FORCED_CLEANUP_THRESHOLD = 1e3; // Threshold for forced market closure (1e3 wei)
 
 /**
  * @title RevvFiMarket
  * @author Preet Singh
  * @notice Core lending market contract managing borrowing, lending, and position tracking
- * @dev Handles borrow/repay operations, interest accrual using Compound-style index, and liquidation coordination
+ * @dev Handles borrow/repay operations, interest accrual, APR tracking, and liquidation coordination
  */
 contract RevvFiMarket is ReentrancyGuard, Initializable {
     using SafeERC20 for IERC20;
     using Math for uint256;
 
-    // Storage variables (set in initialize)
+    // Core market addresses
     address public factory; // Factory contract that created this market
     address public archController; // Architecture controller for protocol permissions
     address public borrower; // Address authorized to borrow from this market
     address public borrowAsset; // Asset token that is borrowed (e.g., USDC)
     address public collateralAsset; // Asset token used as collateral
 
-    // Constants
+    // Protocol constants
     uint256 public constant MAX_APR_BPS = 5000; // Maximum APR in basis points (50%)
     uint256 public constant BASIS_POINTS = 10000; // Basis points denominator (100%)
     uint256 public constant MAX_ACTIVE_POSITIONS = 100; // Maximum active positions per drawdown
 
-    // External contracts
+    // External contract references
     IRevvFiCollateralEscrow public collateralEscrow; // Manages collateral deposits/withdrawals
     IRevvFiOfferBook public offerBook; // Manages lender offers for borrowing
     IRevvFiPositionNFT public positionNFT; // NFT representing lender positions
     IRevvFiLiquidator public liquidator; // Handles liquidation auctions
     IReputationRegistry public reputationRegistry; // Tracks borrower reputation
 
-    // Debt accounting
-    uint256 public totalPrincipal; // Total outstanding principal across all positions
-    uint256 public totalAccruedInterest; // Total accrued but unpaid interest
+    // Index-based debt accounting (similar to Compound's cToken model)
+    uint256 public totalScaledPrincipal; // Scaled principal amount (principal / borrowIndex)
     uint256 public lastInterestAccrualTime; // Timestamp of last interest calculation
-    // OPTIMIZED: Cumulative interest index for true O(1) accrual
-    // Uses Compound/Aave style index: borrowIndex = borrowIndex * (1 + interestRate)
-    uint256 public borrowIndex = 1e18; // Starts at 1.0 (scaled 1e18)
+    uint256 public borrowIndex; // Interest accumulation index (starts at SCALE)
+
+    // O(1) APR tracking using scaled values
+    uint256 public weightedAprNumeratorScaled; // Sum of (scaledPrincipal * APR) for all active positions
     uint256 public weightedAverageAPR; // Current weighted average APR across all positions
 
     // Position-specific state
-    mapping(uint256 => uint256) public positionPrincipal; // Position ID => Principal amount
-    mapping(uint256 => uint256) public positionAccruedInterest; // Position ID => Accrued interest
+    mapping(uint256 => uint256) public positionScaledPrincipal; // Position ID => Scaled principal
     mapping(uint256 => uint256) public positionApr; // Position ID => APR in basis points
     mapping(uint256 => uint8) public positionSeniority; // Position ID => Seniority (0=senior, 1=junior)
     mapping(uint256 => bool) public positionActive; // Position ID => Active status
     mapping(uint256 => bool) public positionSettled; // Position ID => Settled status
     mapping(uint256 => uint256) public positionClaimableAmount; // Position ID => Claimable amount
-    // OPTIMIZED: Store snapshot of borrowIndex when position was created
-    mapping(uint256 => uint256) public positionBorrowIndex; // Position ID => Borrow index at creation
-    // FIXED: Store original lender for settled positions
     mapping(uint256 => address) public settledPositionOwner; // Position ID => Original owner after settlement
 
     // Active positions array with index mapping for O(1) removal
@@ -177,6 +175,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         collateralAsset = _collateralAsset;
         guardian = _factory;
         lastInterestAccrualTime = block.timestamp;
+        borrowIndex = SCALE; // Initialize borrow index to scale (1e18)
         isInitialized = true;
     }
 
@@ -212,40 +211,11 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
     }
 
     /**
-     * @dev Recalculates weighted average APR across all active positions
-     * @notice Called when positions are added or removed (O(N) operation)
-     */
-    function _recalculateWeightedAPR() internal {
-        if (totalPrincipal == 0) {
-            weightedAverageAPR = 0;
-            return;
-        }
-
-        uint256 totalAprWeight = 0;
-        uint256[] memory positions = activePositionIds;
-
-        // O(N) recalculation only happens when positions are added/removed (not on every transaction)
-        for (uint256 i = 0; i < positions.length; i++) {
-            uint256 posId = positions[i];
-            if (positionActive[posId] && positionPrincipal[posId] > 0) {
-                totalAprWeight += positionPrincipal[posId] * positionApr[posId];
-            }
-        }
-
-        weightedAverageAPR = totalAprWeight / totalPrincipal;
-    }
-
-    /**
-     * @dev Accrues interest based on elapsed time and current APR
-     * @notice Uses Compound Finance index pattern for O(1) interest accrual
+     * @dev Accrues interest based on elapsed time and current APR (O(1) implementation)
+     * @notice Updates borrow index and tracks last accrual time
      */
     function _accrueInterest() internal {
-        // OPTIMIZED: TRUE O(1) IMPLEMENTATION using cumulative interest index
-        // Based on Compound Finance index pattern:
-        // borrowIndex_new = borrowIndex_old * (1 + interestAccrued/totalPrincipal)
-        // Per-position interest = principal * (borrowIndex_new / borrowIndex_old - 1)
-
-        if (totalPrincipal == 0) {
+        if (totalScaledPrincipal == 0) {
             lastInterestAccrualTime = block.timestamp;
             return;
         }
@@ -253,24 +223,137 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         uint256 elapsed = block.timestamp - lastInterestAccrualTime;
         if (elapsed == 0) return;
 
-        // Calculate total interest accrued (using weighted average APR)
+        // Calculate current principal from scaled principal and borrow index
+        uint256 currentPrincipal = (totalScaledPrincipal * borrowIndex) / SCALE;
+
+        // Calculate interest accrued since last accrual
         uint256 totalInterestAccrued =
-            (totalPrincipal * weightedAverageAPR * elapsed) / (SECONDS_PER_YEAR * BASIS_POINTS);
+            (currentPrincipal * weightedAverageAPR * elapsed) / (SECONDS_PER_YEAR * BASIS_POINTS);
 
         if (totalInterestAccrued > 0) {
-            // Update cumulative index: new_index = old_index * (1 + interest/principal)
-            // Expanded: new_index = old_index + old_index * interest / principal
-            uint256 indexIncrease = (borrowIndex * totalInterestAccrued) / totalPrincipal;
+            // Increase borrow index proportionally to interest accrued
+            uint256 indexIncrease = (borrowIndex * totalInterestAccrued) / currentPrincipal;
             borrowIndex += indexIncrease;
-
-            // Update total accrued interest
-            totalAccruedInterest += totalInterestAccrued;
         }
 
         lastInterestAccrualTime = block.timestamp;
-
-        emit RevvFiEvents.InterestAccrued(borrower, totalAccruedInterest);
+        emit RevvFiEvents.InterestAccrued(borrower, (totalScaledPrincipal * borrowIndex) / SCALE);
     }
+
+    /**
+     * @dev Calculates updated borrow index without modifying state
+     * @return Current borrow index including pending interest
+     */
+    function _getUpdatedBorrowIndex() internal view returns (uint256) {
+        if (totalScaledPrincipal == 0) return borrowIndex;
+
+        uint256 elapsed = block.timestamp - lastInterestAccrualTime;
+        if (elapsed == 0) return borrowIndex;
+
+        uint256 currentPrincipal = (totalScaledPrincipal * borrowIndex) / SCALE;
+        uint256 totalInterestAccrued =
+            (currentPrincipal * weightedAverageAPR * elapsed) / (SECONDS_PER_YEAR * BASIS_POINTS);
+        uint256 indexIncrease = (borrowIndex * totalInterestAccrued) / currentPrincipal;
+
+        return borrowIndex + indexIncrease;
+    }
+
+    /**
+     * @dev Calculates current debt for a specific position
+     * @param positionId ID of the position to query
+     * @return Current debt amount including accrued interest
+     */
+    function _getPositionDebt(uint256 positionId) internal view returns (uint256) {
+        if (!positionActive[positionId] || positionScaledPrincipal[positionId] == 0) return 0;
+        uint256 currentIndex = _getUpdatedBorrowIndex();
+        return (positionScaledPrincipal[positionId] * currentIndex) / SCALE;
+    }
+
+    /**
+     * @dev Returns total outstanding debt including accrued interest
+     * @return Total debt across all active positions
+     */
+    function getTotalOwed() public view returns (uint256) {
+        uint256 currentIndex = _getUpdatedBorrowIndex();
+        return (totalScaledPrincipal * currentIndex) / SCALE;
+    }
+
+    /**
+     * @dev Returns current principal without interest
+     * @return Current principal amount
+     */
+    function getCurrentPrincipal() public view returns (uint256) {
+        return (totalScaledPrincipal * borrowIndex) / SCALE;
+    }
+
+    // ============================================================
+    // APR TRACKING - O(1) INCREMENTAL UPDATES
+    // ============================================================
+
+    /**
+     * @dev Updates APR numerator when adding a new position
+     * @param scaledPrincipal Scaled principal amount of the new position
+     * @param apr APR of the new position in basis points
+     */
+    function _updateAPROnAdd(uint256 scaledPrincipal, uint256 apr) internal {
+        weightedAprNumeratorScaled += scaledPrincipal * apr;
+        _updateWeightedAverageAPR();
+    }
+
+    /**
+     * @dev Updates APR numerator when removing a position
+     * @param scaledPrincipal Scaled principal amount of the removed position
+     * @param apr APR of the removed position in basis points
+     */
+    function _updateAPROnRemove(uint256 scaledPrincipal, uint256 apr) internal {
+        uint256 reduction = scaledPrincipal * apr;
+        if (reduction <= weightedAprNumeratorScaled) {
+            weightedAprNumeratorScaled -= reduction;
+        } else {
+            weightedAprNumeratorScaled = 0;
+        }
+        _updateWeightedAverageAPR();
+    }
+
+    /**
+     * @dev Updates APR numerator when principal changes for an existing position
+     * @param oldScaledPrincipal Original scaled principal
+     * @param newScaledPrincipal New scaled principal
+     * @param apr APR of the position in basis points
+     */
+    function _updateAPROnPrincipalChange(uint256 oldScaledPrincipal, uint256 newScaledPrincipal, uint256 apr) internal {
+        if (oldScaledPrincipal == newScaledPrincipal) return;
+
+        uint256 oldContribution = oldScaledPrincipal * apr;
+        uint256 newContribution = newScaledPrincipal * apr;
+
+        if (newContribution >= oldContribution) {
+            weightedAprNumeratorScaled += newContribution - oldContribution;
+        } else {
+            uint256 reduction = oldContribution - newContribution;
+            if (reduction <= weightedAprNumeratorScaled) {
+                weightedAprNumeratorScaled -= reduction;
+            } else {
+                weightedAprNumeratorScaled = 0;
+            }
+        }
+        _updateWeightedAverageAPR();
+    }
+
+    /**
+     * @dev Recalculates weighted average APR from numerator and total scaled principal
+     */
+    function _updateWeightedAverageAPR() internal {
+        if (totalScaledPrincipal == 0) {
+            weightedAverageAPR = 0;
+            return;
+        }
+        weightedAverageAPR = weightedAprNumeratorScaled / totalScaledPrincipal;
+    }
+
+    // ============================================================
+    // POSITION MANAGEMENT - SEPARATED CONCERNS
+    // ============================================================
 
     /**
      * @dev Adds a position to the active positions array
@@ -280,12 +363,12 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         activePositionIndex[positionId] = activePositionIds.length;
         activePositionIds.push(positionId);
         positionActive[positionId] = true;
-        // FIXED: Recalculate weighted APR when position is added
-        _recalculateWeightedAPR();
+
+        _updateAPROnAdd(positionScaledPrincipal[positionId], positionApr[positionId]);
     }
 
     /**
-     * @dev Removes a position from active array
+     * @dev Removes a position from active array (APR logic handled separately)
      * @param positionId ID of the position to remove
      */
     function _removeActivePosition(uint256 positionId) internal {
@@ -297,37 +380,27 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         activePositionIndex[lastId] = index;
         activePositionIds.pop();
 
-        positionActive[positionId] = false;
         delete activePositionIndex[positionId];
-        // FIXED: Recalculate weighted APR when position is removed
-        _recalculateWeightedAPR();
+        positionActive[positionId] = false;
     }
 
     /**
-     * @dev Cleans up dust positions with principal below dust threshold
-     * @notice Only callable by borrower to maintain market health
+     * @dev Removes a position and updates all associated accounting
+     * @param positionId ID of the position to remove
+     * @notice Zeroes principal first, then updates totals and APR
      */
-    function sweepDustPositions() public onlyBorrower {
-        // FIXED: Use while loop to safely handle array mutations
-        // Don't increment when removing to avoid skipping elements
-        uint256 i = 0;
-        while (i < activePositionIds.length) {
-            uint256 posId = activePositionIds[i];
+    function _removePositionWithAPR(uint256 positionId) internal {
+        uint256 remainingScaled = positionScaledPrincipal[positionId];
 
-            if (positionActive[posId] && positionPrincipal[posId] < DUST_THRESHOLD && positionPrincipal[posId] > 0) {
-                // Store owner before settling
-                if (settledPositionOwner[posId] == address(0)) {
-                    settledPositionOwner[posId] = positionNFT.ownerOf(posId);
-                }
-                positionClaimableAmount[posId] += positionPrincipal[posId];
-                positionPrincipal[posId] = 0;
-                _settlePosition(posId);
-                // Don't increment i here - we skip it because array was modified
-                continue;
-            }
+        // Zero first to prevent any reentrancy-like state confusion
+        positionScaledPrincipal[positionId] = 0;
 
-            i++;
+        if (remainingScaled > 0) {
+            totalScaledPrincipal -= remainingScaled;
+            _updateAPROnRemove(remainingScaled, positionApr[positionId]);
         }
+
+        _removeActivePosition(positionId);
     }
 
     /**
@@ -364,7 +437,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         accrueInterest
     {
         if (amount == 0) revert RevvFiErrors.ZeroAmount();
-        collateralEscrow.withdrawCollateral(borrower, amount, totalPrincipal + totalAccruedInterest);
+        collateralEscrow.withdrawCollateral(borrower, amount, getTotalOwed());
     }
 
     /**
@@ -395,9 +468,6 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         if (weightedApr > MAX_APR_BPS) revert RevvFiErrors.MaxAprExceeded();
         if (filledOffers.length == 0) revert RevvFiErrors.NoOffersAvailable();
 
-        // Clean up dust positions before adding new ones
-        sweepDustPositions();
-
         // Validate position count limit
         if (activePositionIds.length + filledOffers.length > MAX_ACTIVE_POSITIONS) {
             revert RevvFiErrors.TooManyActivePositions();
@@ -419,17 +489,17 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
             positionIds[i] = tokenId;
             lenderPositions[filledOffers[i].lender].push(tokenId);
 
-            positionPrincipal[tokenId] = filledOffers[i].remainingAmount;
+            // Calculate scaled principal based on current borrow index
+            uint256 scaledPrincipal = (filledOffers[i].remainingAmount * SCALE) / borrowIndex;
+            positionScaledPrincipal[tokenId] = scaledPrincipal;
             positionApr[tokenId] = filledOffers[i].apr;
             positionSeniority[tokenId] = filledOffers[i].seniority;
             positionSettled[tokenId] = false;
-            positionAccruedInterest[tokenId] = 0;
             positionClaimableAmount[tokenId] = 0;
 
+            totalScaledPrincipal += scaledPrincipal;
             _addActivePosition(tokenId);
         }
-
-        totalPrincipal += amount;
 
         // Transfer borrowed funds to borrower
         IERC20 borrowToken = IERC20(borrowAsset);
@@ -451,164 +521,77 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
     function repay(uint256 amount) external onlyBorrower nonReentrant initializedCheck accrueInterest {
         if (amount == 0) revert RevvFiErrors.ZeroAmount();
 
-        uint256 totalOwed = getTotalOwed();
-        if (totalOwed == 0) revert RevvFiErrors.ZeroAmount();
-        if (amount > totalOwed) amount = totalOwed;
+        uint256 totalDebt = getTotalOwed();
+        if (totalDebt == 0) revert RevvFiErrors.ZeroAmount();
+        if (amount > totalDebt) amount = totalDebt;
 
         IERC20 borrowToken = IERC20(borrowAsset);
         borrowToken.safeTransferFrom(borrower, address(this), amount);
 
         _distributeRepayment(amount);
 
-        // Check if any remaining debt exists
-        bool hasRemainingDebt = false;
-        for (uint256 i = 0; i < activePositionIds.length; i++) {
-            uint256 posId = activePositionIds[i];
-            if (
-                positionActive[posId]
-                    && (positionPrincipal[posId] > DUST_THRESHOLD || positionAccruedInterest[posId] > 0)
-            ) {
-                hasRemainingDebt = true;
-                break;
+        // Track successful repayment cycle for reputation
+        if (totalScaledPrincipal == 0) {
+            if (address(reputationRegistry) != address(0) && currentCycleBorrowedAmount > 0) {
+                reputationRegistry.recordSuccessfulRepayment(borrower, currentCycleBorrowedAmount);
+                currentCycleBorrowedAmount = 0;
             }
-        }
-
-        // Track successful repayment cycle for reputation if no debt remains
-        if (!hasRemainingDebt && address(reputationRegistry) != address(0) && currentCycleBorrowedAmount > 0) {
-            reputationRegistry.recordSuccessfulRepayment(borrower, currentCycleBorrowedAmount);
-            currentCycleBorrowedAmount = 0;
         }
 
         emit RevvFiEvents.Repay(borrower, amount, 0, amount);
     }
 
     /**
-     * @dev Distributes repayment amounts to positions (interest first, then principal)
+     * @dev Distributes repayment amounts proportionally to active positions
      * @param repaymentAmount Total amount being repaid
      */
     function _distributeRepayment(uint256 repaymentAmount) internal {
-        if (totalPrincipal == 0 && totalAccruedInterest == 0) return;
+        if (totalScaledPrincipal == 0) return;
 
         uint256 remainingRepayment = repaymentAmount;
-        uint256 originalTotalInterest = totalAccruedInterest;
-        uint256 originalTotalPrincipal = totalPrincipal;
+        uint256 totalDebtBefore = getTotalOwed();
         uint256[] memory positions = activePositionIds;
-        uint256 interestPaid = 0;
-        uint256 principalPaid = 0;
+        uint256 currentIndex = _getUpdatedBorrowIndex();
 
-        // Distribute interest first
-        if (originalTotalInterest > 0 && remainingRepayment > 0) {
-            uint256 interestPayment =
-                remainingRepayment < originalTotalInterest ? remainingRepayment : originalTotalInterest;
-            uint256 lastPositionWithInterest = 0;
-            uint256 positionsWithInterestCount = 0;
+        // Distribute repayment proportionally to each position's debt share
+        for (uint256 i = 0; i < positions.length && remainingRepayment > 0; i++) {
+            uint256 posId = positions[i];
+            if (!positionActive[posId] || positionScaledPrincipal[posId] == 0) continue;
 
-            // Count positions with interest for proper rounding
-            for (uint256 i = 0; i < positions.length; i++) {
-                if (positionActive[positions[i]] && positionAccruedInterest[positions[i]] > 0) {
-                    lastPositionWithInterest = positions[i];
-                    positionsWithInterestCount++;
-                }
-            }
+            uint256 positionDebt = (positionScaledPrincipal[posId] * currentIndex) / SCALE;
+            if (positionDebt == 0) continue;
 
-            uint256 interestDistributed = 0;
-            uint256 positionCounter = 0;
+            // Calculate share proportional to debt
+            uint256 share = (repaymentAmount * positionDebt) / totalDebtBefore;
+            if (share > remainingRepayment) share = remainingRepayment;
+            if (share == 0) continue;
 
-            for (uint256 i = 0; i < positions.length; i++) {
-                uint256 posId = positions[i];
-                if (!positionActive[posId]) continue;
+            positionClaimableAmount[posId] += share;
 
-                uint256 positionInterest = positionAccruedInterest[posId];
-                if (positionInterest == 0) continue;
+            uint256 oldScaledPrincipal = positionScaledPrincipal[posId];
+            uint256 scaledReduction = (share * SCALE) / currentIndex;
+            totalScaledPrincipal -= scaledReduction;
+            positionScaledPrincipal[posId] -= scaledReduction;
 
-                uint256 share;
-                positionCounter++;
+            _updateAPROnPrincipalChange(oldScaledPrincipal, positionScaledPrincipal[posId], positionApr[posId]);
 
-                // FIXED: Last position receives remainder to handle rounding
-                if (positionCounter == positionsWithInterestCount) {
-                    share = interestPayment - interestDistributed;
-                } else {
-                    share = (interestPayment * positionInterest) / originalTotalInterest;
-                    if (share > positionInterest) share = positionInterest;
-                    if (share == 0) continue;
-                }
-
-                positionClaimableAmount[posId] += share;
-                positionAccruedInterest[posId] -= share;
-                interestPaid += share;
-                interestDistributed += share;
-                remainingRepayment -= share;
-            }
+            remainingRepayment -= share;
         }
 
-        // Distribute principal second
-        if (originalTotalPrincipal > 0 && remainingRepayment > 0) {
-            uint256 principalPayment =
-                remainingRepayment < originalTotalPrincipal ? remainingRepayment : originalTotalPrincipal;
-            uint256 lastPositionWithPrincipal = 0;
-            uint256 positionsWithPrincipalCount = 0;
-
-            // Count positions with principal for proper rounding
-            for (uint256 i = 0; i < positions.length; i++) {
-                if (positionActive[positions[i]] && positionPrincipal[positions[i]] > 0) {
-                    lastPositionWithPrincipal = positions[i];
-                    positionsWithPrincipalCount++;
-                }
-            }
-
-            uint256 principalDistributed = 0;
-            uint256 positionCounter = 0;
-
-            for (uint256 i = 0; i < positions.length; i++) {
-                uint256 posId = positions[i];
-                if (!positionActive[posId]) continue;
-
-                uint256 principal = positionPrincipal[posId];
-                if (principal == 0) continue;
-
-                uint256 share;
-                positionCounter++;
-
-                // FIXED: Last position receives remainder to handle rounding
-                if (positionCounter == positionsWithPrincipalCount) {
-                    share = principalPayment - principalDistributed;
-                } else {
-                    share = (principalPayment * principal) / originalTotalPrincipal;
-                    if (share > principal) share = principal;
-                    if (share == 0) continue;
-                }
-
-                positionClaimableAmount[posId] += share;
-                positionPrincipal[posId] -= share;
-                principalPaid += share;
-                principalDistributed += share;
-                remainingRepayment -= share;
-            }
-        }
-
-        // FIXED: Update totals incrementally
-        totalAccruedInterest -= interestPaid;
-        totalPrincipal -= principalPaid;
-
-        // OPTIMIZED: Only recalculate weighted APR if principal changed
-        // This is still O(N) but happens less frequently than accrueInterest
-        if (principalPaid > 0) {
-            _recalculateWeightedAPR();
-        }
-
-        // Clean up dust positions
+        // Clean up dust positions (negligible remaining debt)
         for (uint256 i = 0; i < positions.length; i++) {
             uint256 posId = positions[i];
-            if (positionPrincipal[posId] < DUST_THRESHOLD && positionPrincipal[posId] > 0) {
-                // Store owner before settling if not already stored
+            uint256 positionDebt = (positionScaledPrincipal[posId] * currentIndex) / SCALE;
+
+            if (positionScaledPrincipal[posId] > 0 && positionDebt < DUST_THRESHOLD) {
                 if (settledPositionOwner[posId] == address(0)) {
                     settledPositionOwner[posId] = positionNFT.ownerOf(posId);
                 }
-                positionClaimableAmount[posId] += positionPrincipal[posId];
-                totalPrincipal -= positionPrincipal[posId];
-                positionPrincipal[posId] = 0;
-            }
-            if (positionPrincipal[posId] == 0 && positionAccruedInterest[posId] == 0) {
+                positionClaimableAmount[posId] += positionDebt;
+                _removePositionWithAPR(posId);
+                _settlePosition(posId);
+            } else if (positionScaledPrincipal[posId] == 0) {
+                _removePositionWithAPR(posId);
                 _settlePosition(posId);
             }
         }
@@ -618,29 +601,30 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
      * @dev Repays entire outstanding debt and settles all positions
      */
     function repayFull() external onlyBorrower nonReentrant initializedCheck accrueInterest {
-        uint256 totalOwed = getTotalOwed();
-        if (totalOwed == 0) revert RevvFiErrors.ZeroAmount();
+        uint256 totalDebt = getTotalOwed();
+        if (totalDebt == 0) revert RevvFiErrors.ZeroAmount();
 
         IERC20 borrowToken = IERC20(borrowAsset);
-        borrowToken.safeTransferFrom(borrower, address(this), totalOwed);
+        borrowToken.safeTransferFrom(borrower, address(this), totalDebt);
 
         uint256[] memory positionsToSettle = activePositionIds;
+        uint256 currentIndex = _getUpdatedBorrowIndex();
 
         // Settle all active positions
         for (uint256 i = 0; i < positionsToSettle.length; i++) {
             uint256 posId = positionsToSettle[i];
             if (!positionActive[posId]) continue;
 
-            uint256 totalPositionValue = positionPrincipal[posId] + positionAccruedInterest[posId];
-            positionClaimableAmount[posId] += totalPositionValue;
-            positionPrincipal[posId] = 0;
-            positionAccruedInterest[posId] = 0;
+            uint256 positionDebt = (positionScaledPrincipal[posId] * currentIndex) / SCALE;
+            positionClaimableAmount[posId] += positionDebt;
+            _removePositionWithAPR(posId);
             _settlePosition(posId);
         }
 
-        uint256 repaidAmount = totalOwed;
-        totalPrincipal = 0;
-        totalAccruedInterest = 0;
+        // Reset accounting
+        totalScaledPrincipal = 0;
+        weightedAprNumeratorScaled = 0;
+        weightedAverageAPR = 0;
 
         // Update reputation for successful full repayment
         if (address(reputationRegistry) != address(0) && currentCycleBorrowedAmount > 0) {
@@ -648,23 +632,24 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
             currentCycleBorrowedAmount = 0;
         }
 
-        emit RevvFiEvents.Repay(borrower, repaidAmount, 0, repaidAmount);
+        emit RevvFiEvents.Repay(borrower, totalDebt, 0, totalDebt);
     }
 
     /**
-     * @dev Claims claimable funds from a position (works even after position is settled)
+     * @dev Claims claimable funds from a settled position
      * @param positionId ID of the position to claim from
      */
     function claimFunds(uint256 positionId) external nonReentrant initializedCheck {
         uint256 claimable = positionClaimableAmount[positionId];
         if (claimable == 0) revert RevvFiErrors.NoPrincipalToClaim();
 
+        uint256 contractBalance = IERC20(borrowAsset).balanceOf(address(this));
+        if (claimable > contractBalance) revert RevvFiErrors.InsufficientCollateral();
+
         // Determine claimant (original owner for settled positions)
         address claimant;
         if (positionSettled[positionId]) {
-            // Use stored owner for settled positions
             claimant = settledPositionOwner[positionId];
-            // Fallback to getLenderByTokenId if not stored (should not happen)
             if (claimant == address(0)) {
                 claimant = positionNFT.getLenderByTokenId(positionId);
             }
@@ -687,17 +672,14 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
      * @param positionId ID of the position to settle
      */
     function _settlePosition(uint256 positionId) internal {
-        if (!positionActive[positionId]) return;
+        // Only check if already settled, not if active
         if (positionSettled[positionId]) return;
 
-        // Store the original owner before settling if not already stored
         if (settledPositionOwner[positionId] == address(0)) {
             settledPositionOwner[positionId] = positionNFT.ownerOf(positionId);
         }
 
-        positionActive[positionId] = false;
         positionSettled[positionId] = true;
-        _removeActivePosition(positionId);
         positionNFT.redeemPosition(positionId);
     }
 
@@ -734,7 +716,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         if (isLiquidating) revert RevvFiErrors.AlreadyLiquidating();
         if (!isLiquidatable()) revert RevvFiErrors.InsufficientCollateral();
 
-        uint256 debt = totalPrincipal + totalAccruedInterest;
+        uint256 debt = getTotalOwed();
         uint256 collateral = collateralEscrow.getCollateralBalance(borrower);
 
         collateralEscrow.startLiquidation();
@@ -758,9 +740,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
      */
     function endLiquidation() external onlyFactory nonReentrant {
         if (!isLiquidating) revert RevvFiErrors.NotLiquidatingMarket();
-        if (isLiquidatable()) {
-            revert RevvFiErrors.InsufficientCollateral();
-        }
+        if (isLiquidatable()) revert RevvFiErrors.InsufficientCollateral();
 
         isLiquidating = false;
         collateralEscrow.endLiquidation();
@@ -777,7 +757,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         if (msg.sender != address(liquidator)) revert RevvFiErrors.UnauthorizedCaller();
         if (!isLiquidating) revert RevvFiErrors.NotLiquidatingMarket();
 
-        uint256 originalDebt = totalPrincipal + totalAccruedInterest;
+        uint256 originalDebt = getTotalOwed();
 
         // Record loss if debt was not fully repaid
         if (debtRepaid < originalDebt) {
@@ -820,8 +800,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
     function _distributeLoss(uint256 lossAmount) internal {
         uint256 remainingLoss = lossAmount;
         uint256[] memory positions = activePositionIds;
-        uint256 totalInterestLoss = 0;
-        uint256 totalPrincipalLoss = 0;
+        uint256 currentIndex = _getUpdatedBorrowIndex();
 
         // Junior positions first (seniority == 1) - they absorb losses first
         for (uint256 i = 0; i < positions.length && remainingLoss > 0; i++) {
@@ -829,36 +808,23 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
             if (!positionActive[posId]) continue;
             if (positionSeniority[posId] != 1) continue;
 
-            uint256 positionValue = positionPrincipal[posId] + positionAccruedInterest[posId];
-            if (positionValue >= remainingLoss) {
-                uint256 reduction = remainingLoss;
+            uint256 positionDebt = (positionScaledPrincipal[posId] * currentIndex) / SCALE;
+            if (positionDebt == 0) continue;
 
-                // Apply loss to interest first, then principal
-                if (positionAccruedInterest[posId] >= reduction) {
-                    positionAccruedInterest[posId] -= reduction;
-                    totalInterestLoss += reduction;
-                } else {
-                    totalInterestLoss += positionAccruedInterest[posId];
-                    reduction -= positionAccruedInterest[posId];
-                    positionAccruedInterest[posId] = 0;
-                    if (positionPrincipal[posId] > reduction) {
-                        positionPrincipal[posId] -= reduction;
-                        totalPrincipalLoss += reduction;
-                    } else {
-                        totalPrincipalLoss += positionPrincipal[posId];
-                        positionPrincipal[posId] = 0;
-                    }
-                }
+            if (positionDebt >= remainingLoss) {
+                // Partial loss for this position
+                uint256 oldScaledPrincipal = positionScaledPrincipal[posId];
+                uint256 scaledReduction = (remainingLoss * SCALE) / currentIndex;
+                totalScaledPrincipal -= scaledReduction;
+                positionScaledPrincipal[posId] -= scaledReduction;
+
+                _updateAPROnPrincipalChange(oldScaledPrincipal, positionScaledPrincipal[posId], positionApr[posId]);
+
                 remainingLoss = 0;
             } else {
-                remainingLoss -= positionValue;
-                totalInterestLoss += positionAccruedInterest[posId];
-                totalPrincipalLoss += positionPrincipal[posId];
-                positionPrincipal[posId] = 0;
-                positionAccruedInterest[posId] = 0;
-            }
-
-            if (positionPrincipal[posId] == 0 && positionAccruedInterest[posId] == 0) {
+                // Full loss for this position
+                remainingLoss -= positionDebt;
+                _removePositionWithAPR(posId);
                 _settlePosition(posId);
             }
         }
@@ -869,48 +835,56 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
             if (!positionActive[posId]) continue;
             if (positionSeniority[posId] != 0) continue;
 
-            uint256 positionValue = positionPrincipal[posId] + positionAccruedInterest[posId];
-            if (positionValue >= remainingLoss) {
-                uint256 reduction = remainingLoss;
+            uint256 positionDebt = (positionScaledPrincipal[posId] * currentIndex) / SCALE;
+            if (positionDebt == 0) continue;
 
-                // Apply loss to interest first, then principal
-                if (positionAccruedInterest[posId] >= reduction) {
-                    positionAccruedInterest[posId] -= reduction;
-                    totalInterestLoss += reduction;
-                } else {
-                    totalInterestLoss += positionAccruedInterest[posId];
-                    reduction -= positionAccruedInterest[posId];
-                    positionAccruedInterest[posId] = 0;
-                    if (positionPrincipal[posId] > reduction) {
-                        positionPrincipal[posId] -= reduction;
-                        totalPrincipalLoss += reduction;
-                    } else {
-                        totalPrincipalLoss += positionPrincipal[posId];
-                        positionPrincipal[posId] = 0;
-                    }
-                }
+            if (positionDebt >= remainingLoss) {
+                // Partial loss for this position
+                uint256 oldScaledPrincipal = positionScaledPrincipal[posId];
+                uint256 scaledReduction = (remainingLoss * SCALE) / currentIndex;
+                totalScaledPrincipal -= scaledReduction;
+                positionScaledPrincipal[posId] -= scaledReduction;
+
+                _updateAPROnPrincipalChange(oldScaledPrincipal, positionScaledPrincipal[posId], positionApr[posId]);
+
                 remainingLoss = 0;
             } else {
-                remainingLoss -= positionValue;
-                totalInterestLoss += positionAccruedInterest[posId];
-                totalPrincipalLoss += positionPrincipal[posId];
-                positionPrincipal[posId] = 0;
-                positionAccruedInterest[posId] = 0;
-            }
-
-            if (positionPrincipal[posId] == 0 && positionAccruedInterest[posId] == 0) {
+                // Full loss for this position
+                remainingLoss -= positionDebt;
+                _removePositionWithAPR(posId);
                 _settlePosition(posId);
             }
         }
+    }
 
-        // FIXED: Update totals accurately based on actual interest and principal losses
-        totalAccruedInterest -= totalInterestLoss;
-        totalPrincipal -= totalPrincipalLoss;
+    /**
+     * @dev Forces market closure when debt is below cleanup threshold
+     * @notice Only callable by borrower when debt is minimal
+     */
+    function forceCloseMarket() external onlyBorrower nonReentrant initializedCheck accrueInterest {
+        require(
+            totalScaledPrincipal == 0 || (totalScaledPrincipal * borrowIndex) / SCALE < FORCED_CLEANUP_THRESHOLD,
+            "Debt too high to force close"
+        );
 
-        // Recalculate weighted APR if principal changed
-        if (totalPrincipalLoss > 0) {
-            _recalculateWeightedAPR();
+        // Clean up dust positions
+        uint256[] memory positions = activePositionIds;
+        for (uint256 i = 0; i < positions.length; i++) {
+            uint256 posId = positions[i];
+            if (positionActive[posId] && positionScaledPrincipal[posId] > 0) {
+                uint256 positionDebt = (positionScaledPrincipal[posId] * borrowIndex) / SCALE;
+                if (positionDebt < FORCED_CLEANUP_THRESHOLD) {
+                    positionClaimableAmount[posId] += positionDebt;
+                    _removePositionWithAPR(posId);
+                    _settlePosition(posId);
+                }
+            }
         }
+
+        if (totalScaledPrincipal > 0) revert RevvFiErrors.InsufficientRepayment();
+        if (activePositionIds.length > 0) revert RevvFiErrors.TooManyActivePositions();
+        isClosed = true;
+        emit RevvFiEvents.MarketClosedEvent(borrower, block.timestamp);
     }
 
     /**
@@ -942,7 +916,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
      * @dev Closes market if no outstanding debt
      */
     function closeMarket() external onlyBorrower nonReentrant initializedCheck accrueInterest {
-        if (totalPrincipal > 0) revert RevvFiErrors.InsufficientRepayment();
+        if (totalScaledPrincipal > 0) revert RevvFiErrors.InsufficientRepayment();
         if (activePositionIds.length > 0) revert RevvFiErrors.TooManyActivePositions();
         isClosed = true;
         emit RevvFiEvents.MarketClosedEvent(borrower, block.timestamp);
@@ -954,18 +928,6 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
      */
     function totalAssets() public view returns (uint256) {
         return IERC20(borrowAsset).balanceOf(address(this));
-    }
-
-    /**
-     * @dev Returns total outstanding debt (principal + accrued interest)
-     * @return Total debt amount
-     */
-    function getTotalOwed() public view returns (uint256) {
-        // OPTIMIZED: TRUE O(1) IMPLEMENTATION
-        // No longer loops through positions - simply returns maintained totals
-        // We maintain totalPrincipal and totalAccruedInterest incrementally
-        // This eliminates redundant calculations and consistency risks
-        return totalPrincipal + totalAccruedInterest;
     }
 
     /**
@@ -998,8 +960,9 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
      */
     function getMaxBorrowable() public view returns (uint256) {
         uint256 maxFromCollateral = collateralEscrow.getMaxBorrowable(borrower);
-        if (maxFromCollateral <= getTotalOwed()) return 0;
-        return maxFromCollateral - getTotalOwed();
+        uint256 totalDebt = getTotalOwed();
+        if (maxFromCollateral <= totalDebt) return 0;
+        return maxFromCollateral - totalDebt;
     }
 
     /**
@@ -1012,13 +975,13 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
     }
 
     /**
-     * @dev Returns current value of a position (principal + accrued interest)
+     * @dev Returns current value of a position including accrued interest
      * @param positionId ID of the position
      * @return Current value of the position
      */
     function getPositionValue(uint256 positionId) public view returns (uint256) {
         if (!positionActive[positionId]) return 0;
-        return positionPrincipal[positionId] + positionAccruedInterest[positionId];
+        return (positionScaledPrincipal[positionId] * _getUpdatedBorrowIndex()) / SCALE;
     }
 
     /**
@@ -1046,7 +1009,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
     }
 
     /**
-     * @dev Returns total outstanding debt (alias for getTotalOwed)
+     * @dev Returns total outstanding debt
      * @return Total debt amount
      */
     function totalDebt() external view returns (uint256) {
@@ -1054,10 +1017,10 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
     }
 
     /**
-     * @dev Returns current debt index (alias for getTotalOwed for compatibility)
-     * @return Total debt amount
+     * @dev Returns current borrow index for debt calculation
+     * @return Current borrow index
      */
     function getCurrentDebtIndex() external view returns (uint256) {
-        return getTotalOwed();
+        return borrowIndex;
     }
 }
