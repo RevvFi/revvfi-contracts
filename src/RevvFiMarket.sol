@@ -682,33 +682,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         positionSettled[positionId] = true;
         positionNFT.redeemPosition(positionId);
     }
-
-    /**
-     * @dev Submits a lending offer to the offer book
-     * @param amount Amount to lend
-     * @param apr APR in basis points
-     * @param seniority Seniority level (0=senior, 1=junior)
-     * @param duration Duration of the offer in seconds
-     */
-    function submitOffer(uint256 amount, uint256 apr, uint8 seniority, uint256 duration)
-        external
-        nonReentrant
-        initializedCheck
-    {
-        if (isClosed) revert RevvFiErrors.MarketClosed();
-        if (isLiquidating) revert RevvFiErrors.LiquidationInProgress();
-        if (apr > MAX_APR_BPS) revert RevvFiErrors.MaxAprExceeded();
-        offerBook.submitOffer(amount, apr, seniority, duration);
-    }
-
-    /**
-     * @dev Cancels an existing lending offer
-     * @param offerId ID of the offer to cancel
-     */
-    function cancelOffer(uint256 offerId) external nonReentrant initializedCheck {
-        offerBook.cancelOffer(offerId);
-    }
-
+   
     /**
      * @dev Starts liquidation process if market is liquidatable
      */
