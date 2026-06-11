@@ -75,7 +75,7 @@ contract ReputationRegistry is Ownable, ReentrancyGuard, IReputationRegistry {
      */
     function registerBorrower(address borrower) external onlyFactory {
         if (borrower == address(0)) revert RevvFiErrors.ZeroAddress();
-        if (registeredBorrowers[borrower]) revert RevvFiErrors.BorrowerAlreadyExists();
+        if (registeredBorrowers[borrower]) return;
 
         borrowerProfiles[borrower] = BorrowerProfile({
             borrower: borrower,
