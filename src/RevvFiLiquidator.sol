@@ -290,9 +290,7 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
 
         // Notify market to distribute repayment, record any shortfall as bad debt,
         // and clear the isLiquidating flag so the market returns to normal operation.
-        uint256 lossAmount = auction.debtAmount > auction.highestBid
-            ? auction.debtAmount - auction.highestBid
-            : 0;
+        uint256 lossAmount = auction.debtAmount > auction.highestBid ? auction.debtAmount - auction.highestBid : 0;
         IRevvFiMarket(auction.market).settleLiquidation(auction.highestBid, lossAmount);
     }
 

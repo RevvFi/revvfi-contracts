@@ -11,5 +11,7 @@ out/
 docs/
 
 # Dotenv file
-.env
+.env.localnet
+.env.mainnet
+.env.testnet
 lib/

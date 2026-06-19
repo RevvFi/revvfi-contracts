@@ -18,4 +18,23 @@ remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
     "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/"
 ]
-# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+# ── RPC endpoints ────────────────────────────────────────────────────────────
+# Reference these with --rpc-url <alias> on the CLI.
+# Values are read from the active .env file at runtime.
+[rpc_endpoints]
+localhost = "http://127.0.0.1:8545"
+sepolia   = "${SEPOLIA_RPC_URL}"
+mainnet   = "${MAINNET_RPC_URL}"
+polygon   = "${POLYGON_RPC_URL}"
+
+# ── Block-explorer verification ───────────────────────────────────────────────
+# Used automatically when --verify is passed to forge script / forge create.
+# Set the matching API key in your active .env file.
+#
+#   Testnet (Sepolia) : ETHERSCAN_API_KEY   from https://etherscan.io/myapikey
+#   Mainnet (Polygon) : POLYGONSCAN_API_KEY from https://polygonscan.com/myapikey
+[etherscan]
+mainnet = { key = "${ETHERSCAN_API_KEY}",    chain = 1 }
+sepolia = { key = "${ETHERSCAN_API_KEY}",    chain = 11155111 }
+polygon = { key = "${POLYGONSCAN_API_KEY}",  chain = 137, url = "https://api.polygonscan.com/api" }

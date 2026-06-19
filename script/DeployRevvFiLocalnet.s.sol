@@ -15,189 +15,228 @@ import "../test/mocks/MockERC20.sol";
 import "../test/mocks/MockOracle.sol";
 
 /**
- * @title DeployLocal
- * @author Preet Singh
- * @notice Deployment script for local testing environment
- * @dev Deploys all RevvFi protocol contracts with mock tokens and oracle
+ * @title DeployLocalnet
+ * @notice Deployment script for local Anvil development environment.
+ *         Deploys mock tokens and oracle so everything works out-of-the-box.
+ *
+ * PROTOCOL ROLES
+ * --------------
+ * Admin (deployer / PRIVATE_KEY)
+ *   - Deploys all infrastructure contracts
+ *   - Owns Factory and ArchController
+ *   - Whitelists the borrower via archController.registerBorrower()
+ *   - Does NOT deploy markets — that is the borrower's job
+ *
+ * Borrower (BORROWER address / BORROWER_PRIVATE_KEY)
+ *   - Whitelisted by the admin
+ *   - Calls factory.deployMarket() and pays the deployment fee themselves
+ *   - The market is permanently bound to their address
+ *   - Only they can borrow, repay, and manage collateral
+ *
+ * Note: For localnet convenience, if BORROWER_PRIVATE_KEY is not set, the
+ * deployer key is used as a fallback to sign the borrower's deployMarket()
+ * transaction.  This is acceptable locally because Anvil accounts share the
+ * same node and the factory still binds the market to the BORROWER address.
+ *
+ * Usage:
+ *   anvil                        # terminal 1 — keep running
+ *
+ *   source .env.localnet         # terminal 2
+ *   forge script script/DeployRevvFiLocalnet.s.sol:DeployLocalnet \
+ *     --rpc-url $RPC_URL \
+ *     --broadcast \
+ *     -vvvv
  */
-contract DeployLocal is Script {
-    // Core Protocol Contracts
-    RevvFiArchController public archController; // Access control and borrower management
-    RevvFiFactory public factory; // Factory for deploying markets
-    RevvFiMarket public market; // Market contract instance
-    RevvFiPositionNFT public positionNFT; // NFT representing lending positions
-    RevvFiLiquidator public liquidator; // Handles liquidation auctions
-    ReputationRegistry public reputationRegistry; // Tracks borrower reputation
+contract DeployLocalnet is Script {
+    // ─── Protocol parameters ──────────────────────────────────────────────────
+    uint256 constant DEPLOYMENT_FEE = 0.1 ether;
+    uint256 constant MIN_COLLATERAL_RATIO = 11000; // 110%  (basis points)
+    uint256 constant LIQUIDATION_THRESHOLD = 9500; //  95%
+    int256 constant INITIAL_ETH_PRICE = 2000e8; // $2,000 @ 8 decimals
 
-    // Mock External Contracts
-    MockERC20 public usdc; // Mock USDC token (6 decimals)
-    MockERC20 public weth; // Mock WETH token (18 decimals)
-    MockOracle public oracle; // Mock price oracle
+    // ─── Deployed contract state ──────────────────────────────────────────────
+    RevvFiArchController public archController;
+    RevvFiFactory public factory;
+    RevvFiPositionNFT public positionNFT;
+    RevvFiLiquidator public liquidator;
+    ReputationRegistry public reputationRegistry;
 
-    // Implementation Contract Addresses
-    address public marketImpl;
-    address public escrowImpl;
-    address public offerBookImpl;
-    address public liquidityQueueImpl;
+    MockERC20 public usdc;
+    MockERC20 public weth;
+    MockOracle public oracle;
 
-    // Protocol Configuration Addresses
-    address public owner; // Owner address (fee recipient)
-    address public borrower; // Borrower address for the market
-    address public lender1; // Test lender address 1
-    address public lender2; // Test lender address 2
+    address marketImpl;
+    address escrowImpl;
+    address offerBookImpl;
+    address liquidityQueueImpl;
 
-    // Protocol Parameters
-    uint256 public constant DEPLOYMENT_FEE = 0.1 ether; // Fee to deploy a new market
-    uint256 public constant MIN_COLLATERAL_RATIO = 11000; // 110% minimum collateral ratio (in basis points)
-    uint256 public constant LIQUIDATION_THRESHOLD = 9500; // 95% liquidation threshold (in basis points)
-
-    /**
-     * @dev Sets up environment variables before deployment
-     * @notice Reads addresses from .env file
-     */
-    function setUp() public {
-        owner = vm.envAddress("OWNER");
-        borrower = vm.envAddress("BORROWER");
-        lender1 = vm.envAddress("LENDER1");
-        lender2 = vm.envAddress("LENDER2");
-    }
-
-    /**
-     * @dev Main deployment function - executes all deployment steps
-     */
     function run() public {
-        vm.startBroadcast();
+        uint256 deployerKey = vm.envUint("PRIVATE_KEY");
+        address deployer = vm.addr(deployerKey);
+        address borrower = vm.envAddress("BORROWER");
 
-        // ============================================================
-        // STEP 1: Deploy mock tokens and oracle
-        // ============================================================
-        console.log("\n[STEP 1] Deploying mock tokens and oracle...");
+        // For localnet: fall back to deployer key if borrower key not provided
+        uint256 borrowerKey = vm.envOr("BORROWER_PRIVATE_KEY", deployerKey);
+        address borrowerSigner = vm.addr(borrowerKey);
+
+        console.log("\n=== RevvFi Localnet Deployment ===");
+        console.log("Admin (deployer) :", deployer);
+        console.log("Borrower address :", borrower);
+        console.log("Borrower signer  :", borrowerSigner);
+        if (borrowerKey == deployerKey) {
+            console.log("  Note: BORROWER_PRIVATE_KEY not set, deployer signing on borrower's behalf");
+        }
+
+        // =====================================================================
+        // PHASE 1 — ADMIN: deploy infrastructure and whitelist the borrower
+        // Signer: deployer
+        // =====================================================================
+
+        vm.startBroadcast(deployerKey);
+
+        // Step 1 — Mock tokens and oracle
+        console.log("\n[ADMIN 1/7] Deploying mock tokens and oracle...");
         usdc = new MockERC20("USD Coin", "USDC", 6);
         weth = new MockERC20("Wrapped Ether", "WETH", 18);
-        oracle = new MockOracle(8, 2000e8);
-        console.log("Mock USDC deployed");
-        console.log("Mock WETH deployed");
-        console.log("Mock Oracle deployed");
+        oracle = new MockOracle(8, INITIAL_ETH_PRICE);
+        console.log("  USDC   :", address(usdc));
+        console.log("  WETH   :", address(weth));
+        console.log("  Oracle :", address(oracle));
+        console.log("  Price  : $2,000 (mock, call oracle.setPrice() to change)");
 
-        // ============================================================
-        // STEP 2: Deploy implementation contracts (for cloning)
-        // ============================================================
-        console.log("\n[STEP 2] Deploying implementation contracts...");
+        // Step 2 — Implementation contracts (EIP-1167 clone templates)
+        console.log("\n[ADMIN 2/7] Deploying implementation contracts...");
         marketImpl = address(new RevvFiMarket());
         escrowImpl = address(new RevvFiCollateralEscrow());
         offerBookImpl = address(new RevvFiOfferBook());
         liquidityQueueImpl = address(new RevvFiLiquidityQueue());
-        console.log("Market implementation deployed");
-        console.log("CollateralEscrow implementation deployed");
-        console.log("OfferBook implementation deployed");
-        console.log("LiquidityQueue implementation deployed");
+        console.log("  MarketImpl        :", marketImpl);
+        console.log("  EscrowImpl        :", escrowImpl);
+        console.log("  OfferBookImpl     :", offerBookImpl);
+        console.log("  LiquidityQueueImpl:", liquidityQueueImpl);
 
-        // ============================================================
-        // STEP 3: Deploy Factory (without core contracts)
-        // ============================================================
-        console.log("\n[STEP 3] Deploying Factory...");
+        // Step 3 — Factory (admin-owned, deployer is also fee recipient)
+        console.log("\n[ADMIN 3/7] Deploying Factory...");
         factory = new RevvFiFactory(
-            owner, // feeRecipient - receives deployment fees
-            DEPLOYMENT_FEE, // deploymentFee - fee to deploy new markets
-            marketImpl, // marketImpl - reference implementation
-            escrowImpl, // escrowImpl - reference implementation
-            offerBookImpl, // offerBookImpl - reference implementation
-            liquidityQueueImpl // liquidityQueueImpl - reference implementation
+            deployer, // feeRecipient — receives DEPLOYMENT_FEE per market
+            DEPLOYMENT_FEE,
+            marketImpl,
+            escrowImpl,
+            offerBookImpl,
+            liquidityQueueImpl
         );
-        console.log("Factory deployed");
+        console.log("  Factory:", address(factory));
 
-        // ============================================================
-        // STEP 4: Deploy ArchController (needs factory for registration later)
-        // ============================================================
-        console.log("\n[STEP 4] Deploying ArchController...");
+        // Step 4 — ArchController: whitelist the borrower
+        // Only registered borrower addresses can have a market deployed for them.
+        // The admin registers them here; the borrower deploys the market themselves.
+        console.log("\n[ADMIN 4/7] Deploying ArchController and whitelisting borrower...");
         archController = new RevvFiArchController();
         archController.registerBorrower(borrower);
-        console.log("ArchController deployed");
-        console.log("Borrower registered");
+        console.log("  ArchController      :", address(archController));
+        console.log("  Borrower whitelisted:", borrower);
 
-        // ============================================================
-        // STEP 5: Deploy core contracts with factory address
-        // ============================================================
-        console.log("\n[STEP 5] Deploying core contracts...");
+        // Step 5 — Core singleton contracts (shared across all markets)
+        console.log("\n[ADMIN 5/7] Deploying core contracts...");
         positionNFT = new RevvFiPositionNFT(address(factory));
         liquidator = new RevvFiLiquidator(address(factory));
         reputationRegistry = new ReputationRegistry(address(factory));
-        console.log("PositionNFT deployed");
-        console.log("Liquidator deployed");
-        console.log("ReputationRegistry deployed");
+        console.log("  PositionNFT       :", address(positionNFT));
+        console.log("  Liquidator        :", address(liquidator));
+        console.log("  ReputationRegistry:", address(reputationRegistry));
 
-        // ============================================================
-        // STEP 6: Set core contracts in Factory (onlyOwner)
-        // ============================================================
-        console.log("\n[STEP 6] Setting core contracts in Factory...");
+        // Step 6 — Wire Factory to core contracts
+        console.log("\n[ADMIN 6/7] Wiring Factory...");
         factory.setCoreContracts(
-            address(archController), // archController - access control
-            address(positionNFT), // positionNFT - position NFT contract
-            address(liquidator), // liquidator - liquidation handler
-            address(reputationRegistry) // reputationRegistry - reputation tracking
+            address(archController), address(positionNFT), address(liquidator), address(reputationRegistry)
         );
-        console.log("Core contracts registered with Factory");
-
-        // ============================================================
-        // STEP 7: Register factory with ArchController
-        // ============================================================
-        console.log("\n[STEP 7] Registering Factory with ArchController...");
         factory.registerWithArchController();
-        console.log("Factory registered");
+        console.log("  Done.");
 
-        // ============================================================
-        // STEP 8: Deploy Market
-        // ============================================================
-        console.log("\n[STEP 8] Deploying Market...");
-        address marketAddress = factory.deployMarket{value: DEPLOYMENT_FEE}(
-            borrower, // borrower - authorized borrower address
-            address(usdc), // borrowAsset - USDC (borrow asset)
-            address(weth), // collateralAsset - WETH (collateral asset)
-            address(oracle), // oracle - price oracle
-            18, // collateralDecimals - WETH decimals
-            6, // borrowDecimals - USDC decimals
-            MIN_COLLATERAL_RATIO, // minCollateralRatio - 110%
-            LIQUIDATION_THRESHOLD // liquidationThreshold - 95%
-        );
-        market = RevvFiMarket(marketAddress);
-        console.log("Market deployed");
+        // Step 7 — Mint test tokens to all relevant accounts
+        console.log("\n[ADMIN 7/7] Minting test tokens...");
+        usdc.mint(deployer, 1_000_000e6); // 1 M USDC  to admin
+        weth.mint(deployer, 1_000 ether);
+        usdc.mint(borrower, 100_000e6); // 100 K USDC to borrower
+        weth.mint(borrower, 100 ether);
+        console.log("  Deployer: 1,000,000 USDC + 1,000 WETH");
+        console.log("  Borrower: 100,000 USDC + 100 WETH");
 
         vm.stopBroadcast();
 
-        // ============================================================
-        // DEPLOYMENT SUMMARY
-        // ============================================================
-        console.log("\n================================================");
-        console.log("           DEPLOYMENT SUMMARY");
-        console.log("================================================");
+        // =====================================================================
+        // PHASE 2 — BORROWER: deploy their own market and pay the deployment fee
+        //
+        // factory.deployMarket() has no onlyOwner or msg.sender check — it only
+        // validates that the `borrower` PARAMETER is a registered address.
+        // The market is permanently bound to `borrower` regardless of who signs.
+        //
+        // On localnet: borrowerKey falls back to deployerKey if not set in env,
+        // which is fine for local development.
+        // =====================================================================
 
-        console.log("\n--- Core Protocol Contracts ---");
-        console.log(string.concat("  ArchController:       ", vm.toString(address(archController))));
-        console.log(string.concat("  Factory:              ", vm.toString(address(factory))));
-        console.log(string.concat("  PositionNFT:          ", vm.toString(address(positionNFT))));
-        console.log(string.concat("  Liquidator:           ", vm.toString(address(liquidator))));
-        console.log(string.concat("  ReputationRegistry:   ", vm.toString(address(reputationRegistry))));
-        console.log(string.concat("  Market:               ", vm.toString(marketAddress)));
+        console.log("\n--- Phase 2: Borrower deploys market ---");
 
-        console.log("\n--- External Mock Contracts ---");
-        console.log(string.concat("  Mock USDC:            ", vm.toString(address(usdc))));
-        console.log(string.concat("  Mock WETH:            ", vm.toString(address(weth))));
-        console.log(string.concat("  Mock Oracle:          ", vm.toString(address(oracle))));
+        vm.startBroadcast(borrowerKey);
 
-        console.log("\n--- Implementation Contracts ---");
-        console.log(string.concat("  Market Implementation:     ", vm.toString(marketImpl)));
-        console.log(string.concat("  Escrow Implementation:     ", vm.toString(escrowImpl)));
-        console.log(string.concat("  OfferBook Implementation:  ", vm.toString(offerBookImpl)));
-        console.log(string.concat("  LiquidityQueue Implementation: ", vm.toString(liquidityQueueImpl)));
+        // The borrower calls deployMarket and pays the deployment fee.
+        // The fee is sent to `feeRecipient` (the deployer/admin in this setup).
+        // On localnet the ETH stays within the same Anvil node, so the deployer
+        // effectively pays themselves — net cost is just gas.
+        console.log("\n[BORROWER 1/1] Deploying WETH/USDC market...");
+        address marketAddr = factory.deployMarket{value: DEPLOYMENT_FEE}(
+            borrower, // market bound to this address — only they can borrow
+            address(usdc), // borrow asset  : mock USDC (6 dec)
+            address(weth), // collateral    : mock WETH (18 dec)
+            address(oracle), // mock ETH/USD oracle (initial price: $2,000)
+            18, // collateral decimals
+            6, // borrow asset decimals
+            MIN_COLLATERAL_RATIO,
+            LIQUIDATION_THRESHOLD
+        );
+        console.log("  Market deployed:", marketAddr);
+        console.log("  Market borrower:", borrower);
 
-        console.log("\n--- Configuration ---");
-        console.log(string.concat("  Owner:                ", vm.toString(owner)));
-        console.log(string.concat("  Borrower:             ", vm.toString(borrower)));
-        console.log(string.concat("  Lender1:              ", vm.toString(lender1)));
-        console.log(string.concat("  Lender2:              ", vm.toString(lender2)));
-        console.log(string.concat("  Deployment Fee:       ", vm.toString(DEPLOYMENT_FEE)));
-        console.log(string.concat("  Min Collateral Ratio: ", vm.toString(MIN_COLLATERAL_RATIO)));
-        console.log(string.concat("  Liquidation Threshold:", vm.toString(LIQUIDATION_THRESHOLD)));
-        console.log("================================================");
+        vm.stopBroadcast();
+
+        _printSummary(deployer, borrower, marketAddr);
+    }
+
+    function _printSummary(address deployer, address borrower, address marketAddr) internal view {
+        console.log("\n==================================================");
+        console.log("          LOCALNET DEPLOYMENT SUMMARY");
+        console.log("==================================================");
+        console.log("\n--- Protocol Contracts (deployed by admin) ---");
+        console.log("  ArchController    :", address(archController));
+        console.log("  Factory           :", address(factory));
+        console.log("  PositionNFT       :", address(positionNFT));
+        console.log("  Liquidator        :", address(liquidator));
+        console.log("  ReputationRegistry:", address(reputationRegistry));
+        console.log("\n--- Market (deployed by borrower) ---");
+        console.log("  Market (WETH/USDC):", marketAddr);
+        console.log("  Borrower          :", borrower);
+        console.log("\n--- Mock Contracts ---");
+        console.log("  USDC  :", address(usdc));
+        console.log("  WETH  :", address(weth));
+        console.log("  Oracle:", address(oracle));
+        console.log("  (call oracle.setPrice(newPrice) to simulate price changes)");
+        console.log("\n--- Implementations ---");
+        console.log("  Market        :", marketImpl);
+        console.log("  Escrow        :", escrowImpl);
+        console.log("  OfferBook     :", offerBookImpl);
+        console.log("  LiquidityQueue:", liquidityQueueImpl);
+        console.log("\n--- Roles ---");
+        console.log("  Admin (deployer):", deployer);
+        console.log("  Borrower        :", borrower);
+        console.log("\n--- Parameters ---");
+        console.log("  Deployment Fee       : 0.1 ETH");
+        console.log("  Min Collateral Ratio : 110%");
+        console.log("  Liquidation Threshold: 95%");
+        console.log("  Initial ETH Price    : $2,000 (mock)");
+        console.log("\n--- Test Token Balances ---");
+        console.log("  Deployer: 1,000,000 USDC + 1,000 WETH");
+        console.log("  Borrower: 100,000 USDC + 100 WETH");
+        console.log("\nNote: No Etherscan verification needed for localnet.");
+        console.log("==================================================");
     }
 }

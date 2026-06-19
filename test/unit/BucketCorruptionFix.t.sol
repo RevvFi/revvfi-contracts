@@ -99,8 +99,7 @@ contract BucketCorruptionFixTest is Test {
         // Step 4: Execute drawdown - this should work after the fix
         vm.startPrank(market);
 
-        (IRevvFiOfferBook.Offer[] memory filledOffers, uint256 weightedApr) =
-            offerBook.executeDrawdown(500e6, false);
+        (IRevvFiOfferBook.Offer[] memory filledOffers, uint256 weightedApr) = offerBook.executeDrawdown(500e6, false);
 
         vm.stopPrank();
 
@@ -145,8 +144,7 @@ contract BucketCorruptionFixTest is Test {
 
         // Execute drawdown should work
         vm.startPrank(market);
-        (IRevvFiOfferBook.Offer[] memory filledOffers, uint256 weightedApr) =
-            offerBook.executeDrawdown(2500e6, false); // Need 2500 to use both buckets
+        (IRevvFiOfferBook.Offer[] memory filledOffers, uint256 weightedApr) = offerBook.executeDrawdown(2500e6, false); // Need 2500 to use both buckets
 
         vm.stopPrank();
 
@@ -169,8 +167,7 @@ contract BucketCorruptionFixTest is Test {
 
         // Execute partial drawdown (only 500 USDC out of 2000 USDC)
         vm.startPrank(market);
-        (IRevvFiOfferBook.Offer[] memory filledOffers,) =
-            offerBook.executeDrawdown(500e6, false);
+        (IRevvFiOfferBook.Offer[] memory filledOffers,) = offerBook.executeDrawdown(500e6, false);
         vm.stopPrank();
 
         // Verify partial fill
@@ -185,8 +182,7 @@ contract BucketCorruptionFixTest is Test {
 
         // Second drawdown should work
         vm.startPrank(market);
-        (IRevvFiOfferBook.Offer[] memory filledOffers2,) =
-            offerBook.executeDrawdown(1000e6, false);
+        (IRevvFiOfferBook.Offer[] memory filledOffers2,) = offerBook.executeDrawdown(1000e6, false);
         vm.stopPrank();
 
         assertEq(filledOffers2.length, 1);
@@ -206,8 +202,7 @@ contract BucketCorruptionFixTest is Test {
 
         // Execute full drawdown
         vm.prank(market);
-        (IRevvFiOfferBook.Offer[] memory filledOffers,) =
-            offerBook.executeDrawdown(1000e6, false);
+        (IRevvFiOfferBook.Offer[] memory filledOffers,) = offerBook.executeDrawdown(1000e6, false);
 
         assertEq(filledOffers.length, 1);
         assertEq(filledOffers[0].remainingAmount, 1000e6);
@@ -225,8 +220,7 @@ contract BucketCorruptionFixTest is Test {
 
         // Drawdown should work
         vm.prank(market);
-        (IRevvFiOfferBook.Offer[] memory filledOffers2,) =
-            offerBook.executeDrawdown(1500e6, false);
+        (IRevvFiOfferBook.Offer[] memory filledOffers2,) = offerBook.executeDrawdown(1500e6, false);
 
         assertEq(filledOffers2.length, 1);
         assertEq(filledOffers2[0].id, offer2);

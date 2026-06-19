@@ -682,7 +682,7 @@ contract RevvFiMarket is ReentrancyGuard, Initializable {
         positionSettled[positionId] = true;
         positionNFT.redeemPosition(positionId);
     }
-   
+
     /**
      * @dev Starts liquidation process if market is liquidatable
      */
