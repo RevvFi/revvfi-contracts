@@ -192,9 +192,6 @@ contract LiquidationLifecycleTest is Test {
         assertFalse(auction.active);
         assertTrue(auction.settled);
 
-        vm.prank(address(liquidator));
-        market.settleLiquidation(bidAmount, 0);
-
         assertFalse(market.isLiquidating());
         assertFalse(collateralEscrow.isLiquidationActive());
         assertApproxEqAbs(market.getTotalOwed(), 0, 1);
@@ -277,9 +274,6 @@ contract LiquidationLifecycleTest is Test {
         vm.prank(liquidatorAddress);
         liquidator.settleAuction(auctionId);
 
-        vm.prank(address(liquidator));
-        market.settleLiquidation(minBid, 0);
-
         assertGt(market.badDebt(), 0);
         assertGt(market.totalRealizedLoss(), 0);
 
@@ -343,9 +337,6 @@ contract LiquidationLifecycleTest is Test {
 
         vm.prank(liquidatorAddress);
         liquidator.settleAuction(auctionId);
-
-        vm.prank(address(liquidator));
-        market.settleLiquidation(debtAmount, 0);
 
         uint256 reputationAfter = reputationRegistry.getReputationScore(borrower);
         assertLt(reputationAfter, reputationBefore);
