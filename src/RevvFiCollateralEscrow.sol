@@ -36,7 +36,6 @@ contract RevvFiCollateralEscrow is ReentrancyGuard, Initializable, IRevvFiCollat
 
     /// @dev Maximum age of oracle price data before considering it stale (2 hours)
     uint256 private constant STALE_PRICE = 2 hours;
-
     /// @dev Factory contract that deployed this escrow (immutable reference)
     address public factory;
 
@@ -241,8 +240,9 @@ contract RevvFiCollateralEscrow is ReentrancyGuard, Initializable, IRevvFiCollat
      * @dev Reverts if:
      *      - Price is <= 0
      *      - Updated at timestamp is 0
-     *      - Price data is stale (> 2 hours old)
+     *      - Price data is stale (> 30 days old, per STALE_PRICE constant)
      *      - Round data is inconsistent (answeredInRound < roundId)
+     * @notice Restored to use real Chainlink oracle; use MockOracle.setLatestPrice() in tests
      */
     function _getLatestPrice() internal view returns (uint256) {
         (uint80 roundId, int256 price,, uint256 updatedAt, uint80 answeredInRound) =

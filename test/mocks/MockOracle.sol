@@ -62,4 +62,10 @@ contract MockOracle is IAggregatorV3Interface {
         _price = newPrice;
         _updatedAt = block.timestamp;
     }
+
+    // uint256 overload used by test scripts that pass unsigned price values
+    function setLatestPrice(uint256 newPrice) external {
+        _price = int256(newPrice);
+        _updatedAt = block.timestamp;
+    }
 }

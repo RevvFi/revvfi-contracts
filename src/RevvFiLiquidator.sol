@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IRevvFiLiquidator.sol";
+import "./interfaces/IRevvFiMarket.sol";
 import "./libraries/RevvFiErrors.sol";
 import "./libraries/RevvFiEvents.sol";
 
@@ -267,7 +268,7 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
             return;
         }
 
-        // Transfer funds to market
+        // Transfer funds to market first so market can distribute repayment
         IERC20 borrowToken = IERC20(auction.borrowAsset);
         borrowToken.safeTransfer(auction.market, auction.highestBid);
 
@@ -286,6 +287,13 @@ contract RevvFiLiquidator is ReentrancyGuard, IRevvFiLiquidator {
             auction.highestBid,
             auction.highestBid
         );
+
+        // Notify market to distribute repayment, record any shortfall as bad debt,
+        // and clear the isLiquidating flag so the market returns to normal operation.
+        uint256 lossAmount = auction.debtAmount > auction.highestBid
+            ? auction.debtAmount - auction.highestBid
+            : 0;
+        IRevvFiMarket(auction.market).settleLiquidation(auction.highestBid, lossAmount);
     }
 
     /**

@@ -33,6 +33,7 @@ interface IRevvFiMarket {
     function liquidate() external;
     function startLiquidation() external;
     function endLiquidation() external;
+    function settleLiquidation(uint256 debtRepaid, uint256 lossAmount) external;
 
     // View functions
     function totalDebt() external view returns (uint256);

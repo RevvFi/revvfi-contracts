@@ -137,6 +137,24 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
     }
 
     /**
+     * @dev Removes a bucket from the aprValues array
+     * @param bucketId ID of the bucket to remove
+     */
+    function _removeBucketFromAprValues(uint256 bucketId) internal {
+        uint256 index = aprToIndex[bucketId];
+        uint256 lastBucketId = aprValues[aprValues.length - 1];
+
+        // Swap with last element and pop for O(1) removal
+        aprValues[index] = lastBucketId;
+        aprToIndex[lastBucketId] = index;
+        aprValues.pop();
+
+        // Clean up the removed bucket
+        delete aprToIndex[bucketId];
+        delete aprBuckets[bucketId];
+    }
+
+    /**
      * @dev Adds an offer to the appropriate APR bucket
      * @param apr APR of the offer
      * @param offerId ID of the offer to add
@@ -163,7 +181,7 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
             }
         }
 
-        // Initialize bucket if it doesn't exist
+        // Initialize bucket if it doesn't exist or was deleted
         if (aprBuckets[bucketId].apr == 0) {
             aprBuckets[bucketId].apr = apr;
             aprToIndex[bucketId] = aprValues.length;
@@ -198,6 +216,11 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
                     bucket.offerIds.pop();
                     break;
                 }
+            }
+
+            // CRITICAL FIX: Remove bucket from aprValues if empty
+            if (bucket.offerIds.length == 0) {
+                _removeBucketFromAprValues(bucketId);
             }
         }
         // If offer still has remaining amount, it stays in the bucket with the same offerInBucketId
@@ -496,20 +519,20 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
             offer.remainingAmount -= take;
             totalLiquidity -= take;
 
-            // Update bucket tracking
-            _removeFromBucket(offer.apr, offer.id, take);
-
             filledOffers[i] = offersToFill[i];
             filledOffers[i].remainingAmount = take;
 
             // Transfer funds to market
             IERC20(borrowAsset).safeTransfer(market, take);
 
-            // Deactivate or update offer if partially filled
+            // CRITICAL FIX: Handle full vs partial fills differently
             if (offer.remainingAmount == 0) {
+                // Fully consumed - deactivate (this calls _removeFromBucket internally)
                 offer.active = false;
                 _removeActive(offer.id);
             } else {
+                // Partially filled - update bucket tracking
+                _removeFromBucket(offer.apr, offer.id, take);
                 _addToBucket(offer.apr, offer.id);
             }
 
