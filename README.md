@@ -381,57 +381,57 @@ RevvFi is currently live on the following networks. Addresses below reflect the 
 | Admin (Deployer) | `0x6cCf36a79BE659b4caF703A07E043FC1b15a9e29` |
 | Borrower | `0xDFe588a31E4CC6da86f10d86275883ac70B2667E` |
 
-> **Note:** Two addresses in the deployment log (`Admin` and `LiquidityQueueImpl`) were recorded with 41 hex characters instead of the standard 40-character EVM address length. Please verify these against the `broadcast/` deployment artifacts or Sepolia Etherscan and correct this table if a transcription error occurred during logging.
-
 ### Polygon Mainnet
 
 [![Network: Polygon](https://img.shields.io/badge/Network-Polygon-8247E5?logo=polygon&logoColor=white)](https://polygonscan.com/)
 
-RevvFi is also deployed on Polygon mainnet. Addresses below are placeholders — send over the Polygon deployment log (same format as Sepolia) and these will be filled in with the real addresses and explorer links.
 
+RevvFi is live on Polygon mainnet. This is a production deployment using real assets — always verify addresses against Polygonscan before interacting with any contract.
+ 
 | Network | Chain ID | RPC |
 |---|---|---|
 | Polygon | 137 | `https://polygon-rpc.com` |
-
+ 
 **Protocol Contracts**
-
+ 
 | Contract | Address | Explorer |
 |---|---|---|
-| ArchController | `0x...` | [View](https://polygonscan.com/address/0x...) |
-| Factory | `0x...` | [View](https://polygonscan.com/address/0x...) |
-| PositionNFT | `0x...` | [View](https://polygonscan.com/address/0x...) |
-| Liquidator | `0x...` | [View](https://polygonscan.com/address/0x...) |
-| ReputationRegistry | `0x...` | [View](https://polygonscan.com/address/0x...) |
-
+| ArchController | `0x29D187421416B260530034A662A79712d7f7c97b` | [View](https://polygonscan.com/address/0x29D187421416B260530034A662A79712d7f7c97b) |
+| Factory | `0xF51101c98bcDE6a9ccad65a7Df538f558Af907D4` | [View](https://polygonscan.com/address/0xF51101c98bcDE6a9ccad65a7Df538f558Af907D4) |
+| PositionNFT | `0xc685f0F5472304D73964bDf8980652F7d023c485` | [View](https://polygonscan.com/address/0xc685f0F5472304D73964bDf8980652F7d023c485) |
+| Liquidator | `0x6bf84c9aa29c28f70C9c5DbC837310DB8fEaDF7f` | [View](https://polygonscan.com/address/0x6bf84c9aa29c28f70C9c5DbC837310DB8fEaDF7f) |
+| ReputationRegistry | `0x3895D539D8E09aa6809274e0F881490b2fC25B3C` | [View](https://polygonscan.com/address/0x3895D539D8E09aa6809274e0F881490b2fC25B3C) |
+ 
 **Implementation Contracts**
-
+ 
 | Contract | Address | Explorer |
 |---|---|---|
-| Market Implementation | `0x...` | [View](https://polygonscan.com/address/0x...) |
-| Escrow Implementation | `0x...` | [View](https://polygonscan.com/address/0x...) |
-| OfferBook Implementation | `0x...` | [View](https://polygonscan.com/address/0x...) |
-| LiquidityQueue Implementation | `0x...` | [View](https://polygonscan.com/address/0x...) |
-
+| Market Implementation | `0xaB72BDdD3aa47A23b1F4D821C8018826Eb505528` | [View](https://polygonscan.com/address/0xaB72BDdD3aa47A23b1F4D821C8018826Eb505528) |
+| Escrow Implementation | `0xA8d016492488F3116f5bB3f1E86009690C740E78` | [View](https://polygonscan.com/address/0xA8d016492488F3116f5bB3f1E86009690C740E78) |
+| OfferBook Implementation | `0xd5b86aA515d121197e29DE353c5BF11A4578bd5a` | [View](https://polygonscan.com/address/0xd5b86aA515d121197e29DE353c5BF11A4578bd5a) |
+| LiquidityQueue Implementation | `0x6247D163A0e1b2cfdD5ECAecbc6648D18192728e` | [View](https://polygonscan.com/address/0x6247D163A0e1b2cfdD5ECAecbc6648D18192728e) |
+ 
 **Example Market**
-
+ 
 | Contract | Address | Explorer |
 |---|---|---|
-| Market (WETH/USDC) | `0x...` | [View](https://polygonscan.com/address/0x...) |
-
-**Mock Tokens & Oracle** (if applicable — remove this table for a production mainnet deployment using real assets)
-
+| Market (WETH/USDC) | `0x7CDA02daB71dfC6340319cf64310e2BB463a3C82` | [View](https://polygonscan.com/address/0x7CDA02daB71dfC6340319cf64310e2BB463a3C82) |
+ 
+**External Contracts** (native Polygon mainnet assets — not deployed by RevvFi)
+ 
 | Contract | Address | Explorer |
 |---|---|---|
-| USDC | `0x...` | [View](https://polygonscan.com/address/0x...) |
-| WETH | `0x...` | [View](https://polygonscan.com/address/0x...) |
-| Oracle | `0x...` | [View](https://polygonscan.com/address/0x...) |
-
+| USDC (native) | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | [View](https://polygonscan.com/address/0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359) |
+| WETH | `0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619` | [View](https://polygonscan.com/address/0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619) |
+| Oracle (ETH/USD) | `0xF9680D99D6C9589e2a93a78A04A279e509205945` | [View](https://polygonscan.com/address/0xF9680D99D6C9589e2a93a78A04A279e509205945) |
+ 
 **Roles**
-
+ 
 | Role | Address |
 |---|---|
-| Admin (Deployer) | `0x...` |
-| Borrower | `0x...` |
+| Admin (Deployer) | `0x6cCf36a79BE659b4caF703A07E043FC1b15a9e29` |
+| Fee Recipient | `0x6cCf36a79BE659b4caF703A07E043FC1b15a9e29` |
+| Borrower | `0xDFe588a31E4CC6da86f10d86275883ac70B2667E` |
 
 ## How It Works
 
