@@ -1,5 +1,11 @@
 # RevvFi Protocol
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Solidity](https://img.shields.io/badge/Solidity-0.8.33-363636?logo=solidity&logoColor=white)](https://docs.soliditylang.org/)
+[![Built with Foundry](https://img.shields.io/badge/Built%20with-Foundry-FFDB1C?logo=ethereum&logoColor=black)](https://book.getfoundry.sh/)
+[![Network: Sepolia](https://img.shields.io/badge/Network-Sepolia-7CA1F6?logo=ethereum&logoColor=white)](https://sepolia.etherscan.io/)
+[![Network: Polygon](https://img.shields.io/badge/Network-Polygon-8247E5?logo=polygon&logoColor=white)](https://polygonscan.com/)
+
 A decentralized lending protocol enabling peer-to-peer loan matching with variable interest rates, collateralized borrowing, and reputation-based risk assessment on the blockchain.
 
 ## Table of Contents
@@ -9,13 +15,12 @@ A decentralized lending protocol enabling peer-to-peer loan matching with variab
 - [System Architecture](#system-architecture)
 - [Core Concepts](#core-concepts)
 - [Smart Contracts](#smart-contracts)
+- [Deployed Contracts](#deployed-contracts)
 - [How It Works](#how-it-works)
 - [Getting Started](#getting-started)
 - [Testing](#testing)
 - [Security Considerations](#security-considerations)
 - [License](#license)
-
----
 
 ## Overview
 
@@ -32,58 +37,67 @@ RevvFi is a sophisticated decentralized lending protocol that facilitates peer-t
 - **Withdrawal Queue**: Epoch-based withdrawal system preventing bank runs and ensuring orderly liquidity management
 - **Tiered Lending**: Support for senior and junior lending positions with different risk/reward profiles
 
----
-
 ## Key Features
 
-### 1. **Multi-Market Architecture**
+### 1. Multi-Market Architecture
+
 Each borrower controls an independent lending market where they can secure loans. Markets are isolated, allowing borrowers to manage reputation and collateral separately.
 
-### 2. **Competitive Offer Matching**
+### 2. Competitive Offer Matching
+
 Lenders submit offers with custom APRs and seniority levels. The protocol matches borrow requests with the most favorable offers, with senior offers prioritized.
 
-### 3. **Collateral Escrow & Health Monitoring**
+### 3. Collateral Escrow & Health Monitoring
+
 Collateral is held in a dedicated escrow contract with continuous health monitoring:
+
 - **Min Collateral Ratio**: Minimum required collateral value vs. debt
 - **Liquidation Threshold**: Ratio at which position becomes liquidatable
 - **Oracle Integration**: Chainlink price feeds for real-time collateral valuation
 
-### 4. **Interest Accrual Engine**
+### 4. Interest Accrual Engine
+
 - Per-position APR tracking
 - Automatic compound interest calculation
 - Synchronized accrual across all active positions
 - Real-time interest updates during borrowing and repayment
 
-### 5. **Dutch Auction Liquidation**
-When positions become undercollateralized, collateral is auctioned:
-- Starting price: 100% of debt
-- Decreasing price: Configurable step-based price reductions
-- Reserve price: 80% of debt ensures minimum recovery
-- Bid-time auction extension: Late bids extend auction window
+### 5. Dutch Auction Liquidation
 
-### 6. **Reputation & Risk Rating**
+When positions become undercollateralized, collateral is auctioned:
+
+- **Starting price**: 100% of debt
+- **Decreasing price**: Configurable step-based price reductions
+- **Reserve price**: 80% of debt ensures minimum recovery
+- **Bid-time auction extension**: Late bids extend auction window
+
+### 6. Reputation & Risk Rating
+
 Borrowers earn reputation scores (0-1000) based on:
+
 - **Starting Score**: 500 for new borrowers
 - **Success Bonus**: +1 point per successful loan repayment
 - **Default Penalty**: -50 points per default
 - **Risk Labels**: AAA (900+), AA (800-899), A (700-799), B (500-699), C (300-499), D (<300)
 
-### 7. **Position NFTs**
+### 7. Position NFTs
+
 Lender positions are ERC721 NFTs encoding:
+
 - Principal amount
 - APR and seniority level
 - Market association
 - Creation timestamp
 - Active/settled status
 
-### 8. **Liquidity Queue Management**
+### 8. Liquidity Queue Management
+
 Epoch-based withdrawal system:
+
 - Requests queued for specific epochs
 - Position NFTs locked during withdrawal requests
 - Proportional fulfillment based on available liquidity
 - Prevents bank-run scenarios
-
----
 
 ## System Architecture
 
@@ -109,18 +123,17 @@ v                         v                     v
 ┌──────────────────┐ ┌──────────────┐ ┌────────────────┐
 │Collateral Escrow │ │Offer Book    │ │Liquidity Queue │
 │                  │ │              │ │                │
-│- Deposit         │ │- Submit      │ │- Withdrawal    │
+│- Deposit         │ │- Withdraw    │ │- Withdrawal    │
 │- Withdraw        │ │  Offers      │ │  Requests      │
 │- Collateral      │ │- Cancel      │ │- Epoch         │
 │  Valuation       │ │  Offers      │ │  Processing    │
 └──────────────────┘ └──────────────┘ └────────────────┘
 ```
 
----
-
 ## Core Concepts
 
 ### Collateral Ratio
+
 ```
 Collateral Ratio = (Collateral Value in Borrow Asset) / Total Debt × 100%
 ```
@@ -128,6 +141,7 @@ Collateral Ratio = (Collateral Value in Borrow Asset) / Total Debt × 100%
 A ratio of 150% means borrower has $1.50 in collateral for every $1 owed.
 
 ### Interest Accrual
+
 ```
 Interest = Principal × APR (bps) × Time Elapsed (seconds) / (365 days × 10,000 bps)
 ```
@@ -153,6 +167,7 @@ During liquidation, senior lenders are paid first from auction proceeds.
 ### Withdrawal Epochs
 
 The protocol uses 7-day epochs to manage lender withdrawals:
+
 1. Lender requests withdrawal of their position
 2. Request queued for next epoch
 3. Position NFT becomes locked (non-transferable)
@@ -160,13 +175,12 @@ The protocol uses 7-day epochs to manage lender withdrawals:
 5. Lender claims their fulfilled amount
 6. Remaining balance returns to position (if any)
 
----
-
 ## Smart Contracts
 
 ### Core Contracts
 
-#### **RevvFiFactory**
+#### RevvFiFactory
+
 The deployment hub that initializes all protocol components.
 
 **Key Functions:**
@@ -181,7 +195,8 @@ The deployment hub that initializes all protocol components.
 - Reputation Registry
 - Arch Controller integration
 
-#### **RevvFiArchController**
+#### RevvFiArchController
+
 Central permission and registry management system.
 
 **Key Functions:**
@@ -195,7 +210,8 @@ Central permission and registry management system.
 - Controller permissions
 - Asset blacklist
 
-#### **RevvFiMarket**
+#### RevvFiMarket
+
 Core lending market contract managing borrowing, repayment, and interest.
 
 **Key Functions:**
@@ -213,7 +229,8 @@ Core lending market contract managing borrowing, repayment, and interest.
 - Collateral health monitoring
 - Market state (open/closed/paused)
 
-#### **RevvFiCollateralEscrow**
+#### RevvFiCollateralEscrow
+
 Secure collateral custody and valuation.
 
 **Key Functions:**
@@ -228,7 +245,8 @@ Secure collateral custody and valuation.
 - Stale price detection (2-hour threshold)
 - Health status enumeration (Healthy/Warning/Liquidatable)
 
-#### **RevvFiOfferBook**
+#### RevvFiOfferBook
+
 Lending offer management and matching engine.
 
 **Key Functions:**
@@ -245,7 +263,8 @@ Lending offer management and matching engine.
 - Seniority-level support
 - Expired offer cleanup
 
-#### **RevvFiPositionNFT**
+#### RevvFiPositionNFT
+
 ERC721 representation of lender positions.
 
 **Key Functions:**
@@ -261,7 +280,8 @@ ERC721 representation of lender positions.
 - Creation timestamp
 - Active status
 
-#### **RevvFiLiquidator**
+#### RevvFiLiquidator
+
 Auction-based liquidation mechanism.
 
 **Key Functions:**
@@ -271,13 +291,14 @@ Auction-based liquidation mechanism.
 - `settleAuction()` - Finalize auction and distribute proceeds
 
 **Auction Mechanics:**
-- **Duration**: 3 days
-- **Price Decay**: 5% per hour
-- **Reserve Price**: 80% of debt
-- **Bid Increment**: 1% minimum
-- **Extension Window**: 15 minutes (extended when bids placed near end)
+- Duration: 3 days
+- Price Decay: 5% per hour
+- Reserve Price: 80% of debt
+- Bid Increment: 1% minimum
+- Extension Window: 15 minutes (extended when bids placed near end)
 
-#### **RevvFiLiquidityQueue**
+#### RevvFiLiquidityQueue
+
 Withdrawal request management with epoch-based processing.
 
 **Key Functions:**
@@ -287,11 +308,12 @@ Withdrawal request management with epoch-based processing.
 - `claimWithdrawal()` - Lender claims fulfilled amount
 
 **Configuration:**
-- **Epoch Duration**: 7 days
-- **Max Requests Per Epoch**: 500
-- **Position Locking**: During active withdrawal request
+- Epoch Duration: 7 days
+- Max Requests Per Epoch: 500
+- Position Locking: During active withdrawal request
 
-#### **ReputationRegistry**
+#### ReputationRegistry
+
 On-chain borrower performance tracking and scoring.
 
 **Key Functions:**
@@ -307,13 +329,116 @@ Score = (Successful Loans / Total Loans × 1000) - (Defaults × 50)
 Range: 0-1000
 ```
 
----
+## Deployed Contracts
+
+RevvFi is currently live on the following networks. Addresses below reflect the most recent deployment logs. Always cross-check against the linked block explorer and the project's `broadcast/` artifacts before interacting with any contract.
+
+### Sepolia Testnet
+
+[![Network: Sepolia](https://img.shields.io/badge/Network-Sepolia-7CA1F6?logo=ethereum&logoColor=white)](https://sepolia.etherscan.io/)
+
+| Network | Chain ID | RPC |
+|---|---|---|
+| Sepolia | 11155111 | `https://sepolia.infura.io/v3/YOUR_KEY` |
+
+**Protocol Contracts**
+
+| Contract | Address | Explorer |
+|---|---|---|
+| ArchController | `0x03Fb4beFaF8Ec0AC0D91CfE78ee5A65559CBDE68` | [View](https://sepolia.etherscan.io/address/0x03Fb4beFaF8Ec0AC0D91CfE78ee5A65559CBDE68) |
+| Factory | `0x040Da0AB6abF40d1c175AB9f11265D2825e9730c` | [View](https://sepolia.etherscan.io/address/0x040Da0AB6abF40d1c175AB9f11265D2825e9730c) |
+| PositionNFT | `0xc685f0F5472304D73964bDf8980652F7d023c485` | [View](https://sepolia.etherscan.io/address/0xc685f0F5472304D73964bDf8980652F7d023c485) |
+| Liquidator | `0x6bf84c9aa29c28f70C9c5DbC837310DB8fEaDF7f` | [View](https://sepolia.etherscan.io/address/0x6bf84c9aa29c28f70C9c5DbC837310DB8fEaDF7f) |
+| ReputationRegistry | `0x3895D539D8E09aa6809274e0F881490b2fC25B3C` | [View](https://sepolia.etherscan.io/address/0x3895D539D8E09aa6809274e0F881490b2fC25B3C) |
+
+**Implementation Contracts**
+
+| Contract | Address | Explorer |
+|---|---|---|
+| Market Implementation | `0xd5b86aA515d121197e29DE353c5BF11A4578bd5a` | [View](https://sepolia.etherscan.io/address/0xd5b86aA515d121197e29DE353c5BF11A4578bd5a) |
+| Escrow Implementation | `0x6247D163A0e1b2cfdD5ECAecbc6648D18192728e` | [View](https://sepolia.etherscan.io/address/0x6247D163A0e1b2cfdD5ECAecbc6648D18192728e) |
+| OfferBook Implementation | `0xF51101c98bcDE6a9ccad65a7Df538f558Af907D4` | [View](https://sepolia.etherscan.io/address/0xF51101c98bcDE6a9ccad65a7Df538f558Af907D4) |
+| LiquidityQueue Implementation | `0x29D187421416B260530034A662A79712d7f7c97b` | [View](https://sepolia.etherscan.io/address/0x29D187421416B260530034A662A79712d7f7c97b) |
+
+**Example Market**
+
+| Contract | Address | Explorer |
+|---|---|---|
+| Market (WETH/USDC) | `0x44978cff4366A4c0C412dD3d16103247e19e4e2d` | [View](https://sepolia.etherscan.io/address/0x44978cff4366A4c0C412dD3d16103247e19e4e2d) |
+
+**Mock Tokens & Oracle** (testnet only — not used in production)
+
+| Contract | Address | Explorer |
+|---|---|---|
+| Mock USDC | `0xaB72BDdD3aa47A23b1F4D821C8018826Eb505528` | [View](https://sepolia.etherscan.io/address/0xaB72BDdD3aa47A23b1F4D821C8018826Eb505528) |
+| Mock WETH | `0xA8d016492488F3116f5bB3f1E86009690C740E78` | [View](https://sepolia.etherscan.io/address/0xA8d016492488F3116f5bB3f1E86009690C740E78) |
+| Chainlink Oracle (WETH/USD) | `0x694AA1769357215DE4FAC081bf1f309aDC325306` | [View](https://sepolia.etherscan.io/address/0x694AA1769357215DE4FAC081bf1f309aDC325306) |
+
+**Roles**
+
+| Role | Address |
+|---|---|
+| Admin (Deployer) | `0x6cCf36a79BE659b4caF703A07E043FC1b15a9e29` |
+| Borrower | `0xDFe588a31E4CC6da86f10d86275883ac70B2667E` |
+
+> **Note:** Two addresses in the deployment log (`Admin` and `LiquidityQueueImpl`) were recorded with 41 hex characters instead of the standard 40-character EVM address length. Please verify these against the `broadcast/` deployment artifacts or Sepolia Etherscan and correct this table if a transcription error occurred during logging.
+
+### Polygon Mainnet
+
+[![Network: Polygon](https://img.shields.io/badge/Network-Polygon-8247E5?logo=polygon&logoColor=white)](https://polygonscan.com/)
+
+RevvFi is also deployed on Polygon mainnet. Addresses below are placeholders — send over the Polygon deployment log (same format as Sepolia) and these will be filled in with the real addresses and explorer links.
+
+| Network | Chain ID | RPC |
+|---|---|---|
+| Polygon | 137 | `https://polygon-rpc.com` |
+
+**Protocol Contracts**
+
+| Contract | Address | Explorer |
+|---|---|---|
+| ArchController | `0x...` | [View](https://polygonscan.com/address/0x...) |
+| Factory | `0x...` | [View](https://polygonscan.com/address/0x...) |
+| PositionNFT | `0x...` | [View](https://polygonscan.com/address/0x...) |
+| Liquidator | `0x...` | [View](https://polygonscan.com/address/0x...) |
+| ReputationRegistry | `0x...` | [View](https://polygonscan.com/address/0x...) |
+
+**Implementation Contracts**
+
+| Contract | Address | Explorer |
+|---|---|---|
+| Market Implementation | `0x...` | [View](https://polygonscan.com/address/0x...) |
+| Escrow Implementation | `0x...` | [View](https://polygonscan.com/address/0x...) |
+| OfferBook Implementation | `0x...` | [View](https://polygonscan.com/address/0x...) |
+| LiquidityQueue Implementation | `0x...` | [View](https://polygonscan.com/address/0x...) |
+
+**Example Market**
+
+| Contract | Address | Explorer |
+|---|---|---|
+| Market (WETH/USDC) | `0x...` | [View](https://polygonscan.com/address/0x...) |
+
+**Mock Tokens & Oracle** (if applicable — remove this table for a production mainnet deployment using real assets)
+
+| Contract | Address | Explorer |
+|---|---|---|
+| USDC | `0x...` | [View](https://polygonscan.com/address/0x...) |
+| WETH | `0x...` | [View](https://polygonscan.com/address/0x...) |
+| Oracle | `0x...` | [View](https://polygonscan.com/address/0x...) |
+
+**Roles**
+
+| Role | Address |
+|---|---|
+| Admin (Deployer) | `0x...` |
+| Borrower | `0x...` |
 
 ## How It Works
 
 ### Scenario: Complete Lending Cycle
 
 #### Step 1: Borrower Deploys Market
+
 ```
 1. Borrower registers with ArchController
 2. Borrower calls Factory.deployMarket() with:
@@ -332,6 +457,7 @@ Range: 0-1000
 ```
 
 #### Step 2: Lenders Submit Offers
+
 ```
 1. Lender approves OfferBook to spend borrow asset
 2. Lender calls OfferBook.submitOffer():
@@ -344,6 +470,7 @@ Range: 0-1000
 ```
 
 #### Step 3: Borrower Deposits Collateral
+
 ```
 1. Borrower approves Market to spend collateral (WETH)
 2. Borrower calls Market.depositCollateral(10 WETH):
@@ -353,6 +480,7 @@ Range: 0-1000
 ```
 
 #### Step 4: Borrower Borrows
+
 ```
 1. Borrower calls Market.borrow(50,000 USDC, false, 600 bps):
    - Amount: 50,000 USDC
@@ -366,6 +494,7 @@ Range: 0-1000
 ```
 
 #### Step 5: Interest Accrues
+
 ```
 1. Every 7 days:
    Interest = 50,000 × 500 bps × 604,800s / (31,536,000s × 10,000)
@@ -376,6 +505,7 @@ Range: 0-1000
 ```
 
 #### Step 6: Borrower Repays
+
 ```
 1. Borrower approves Market to spend 50,500 USDC (principal + interest)
 2. Borrower calls Market.repay(50,500):
@@ -386,6 +516,7 @@ Range: 0-1000
 ```
 
 #### Step 7: Lender Withdraws
+
 ```
 1. Lender calls LiquidityQueue.requestWithdrawal(tokenId=1, amount=50500):
 2. Withdrawal queued for next epoch
@@ -396,9 +527,11 @@ Range: 0-1000
 7. USDC transferred to lender's wallet
 ```
 
-#### Alternative: Liquidation Scenario
-```
+### Alternative: Liquidation Scenario
+
 If WETH price drops to $1500:
+
+```
 Ratio = 10 × $1500 / $50,500 = 29.7% < 130% threshold
 
 1. Market.liquidate() called
@@ -414,56 +547,56 @@ Ratio = 10 × $1500 / $50,500 = 29.7% < 130% threshold
    - Remaining collateral returned to borrower (if any)
 ```
 
----
-
 ## Getting Started
 
 ### Prerequisites
 
-- **Node.js** 16.x or higher
-- **Foundry** (for Solidity development and testing)
+- Node.js 16.x or higher
+- Foundry (for Solidity development and testing)
   ```bash
   curl -L https://foundry.paradigm.xyz | bash
   foundryup
   ```
-- **Git**
+- Git
 
 ### Installation
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/your-org/revvfi-contracts.git
-   cd revvfi-contracts
-   ```
+Clone the repository:
 
-2. **Install dependencies:**
-   ```bash
-   forge install
-   ```
+```bash
+git clone https://github.com/your-org/revvfi-contracts.git
+cd revvfi-contracts
+```
 
-3. **Build contracts:**
-   ```bash
-   forge build
-   ```
+Install dependencies:
+
+```bash
+forge install
+```
+
+Build contracts:
+
+```bash
+forge build
+```
 
 ### Environment Setup
 
 Create a `.env` file in the root directory:
 
-```env
+```bash
 # Network RPC endpoints
-ETHEREUM_RPC=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
+SEPOLIA_RPC=https://sepolia.infura.io/v3/YOUR_KEY
 POLYGON_RPC=https://polygon-rpc.com
 
 # Private keys for deployment
 DEPLOYER_PRIVATE_KEY=0x...
 ORACLE_SIGNER_PRIVATE_KEY=0x...
-
 ```
 
 ### Deployment
 
-To deploy to testnet:
+To deploy:
 
 ```bash
 # Load environment variables
@@ -471,9 +604,12 @@ source .env
 
 # Deploy to Sepolia testnet
 forge script script/DeployRevvFi.s.sol --rpc-url $SEPOLIA_RPC --private-key $DEPLOYER_PRIVATE_KEY --broadcast
+
+# Deploy to Polygon mainnet
+forge script script/DeployRevvFi.s.sol --rpc-url $POLYGON_RPC --private-key $DEPLOYER_PRIVATE_KEY --broadcast --verify
 ```
 
----
+> **Mainnet caution:** Polygon deployment above uses real funds and is irreversible once broadcast. Run the full test suite, double-check constructor arguments, and confirm the deployer wallet/private key before running this against `$POLYGON_RPC`. The `--verify` flag submits source code to Polygonscan so the contract is publicly verifiable.
 
 ## Testing
 
@@ -539,37 +675,41 @@ test/
 - **Reputation**: Score calculation, penalty application
 - **Edge Cases**: Price oracle failures, rounding errors, reentrancy
 
----
-
 ## Security Considerations
 
 ### Reentrancy Protection
+
 All external functions use OpenZeppelin's `ReentrancyGuard` to prevent reentrancy attacks.
 
 ### Oracle Risk
+
 - **Implementation**: Chainlink price feeds with configurable staleness threshold (2 hours)
-- **Mitigation**: 
+- **Mitigation**:
   - Staleness checks before using prices
   - Liquidation reserve price ensures recovery even with price volatility
   - Liquidation threshold provides safety margin
 
 ### Arithmetic Safety
+
 - **Solidity 0.8.33**: Native overflow/underflow protection
 - **SafeERC20**: Used for all token transfers with revert on failure
 - **Decimal Handling**: Careful calculation of collateral value across token decimals
 
 ### Access Control
+
 - **Role-Based**: Factory, market, and escrow contracts enforce caller validation
 - **Timelock**: Arch controller updates require 2-day timelock delay
 - **Owner Functions**: Critical configuration changes only via owner calls
 
 ### Liquidation Safeguards
+
 - **Reserve Price**: Ensures minimum recovery at 80% of debt
 - **Auction Duration**: 3 days allows market participation
 - **Price Decay**: Gradual decline encourages competitive bidding
 - **Bid Extension**: Late bids extend auction to prevent sniping
 
 ### Withdrawal Queue Safety
+
 - **Epoch-Based**: Prevents flash loan attacks and bank runs
 - **Position Locking**: NFTs locked during withdrawal to prevent double-spending
 - **Proportional Fulfillment**: Available liquidity distributed fairly
@@ -577,7 +717,7 @@ All external functions use OpenZeppelin's `ReentrancyGuard` to prevent reentranc
 ### Known Risks & Mitigations
 
 | Risk | Mitigation |
-|------|-----------|
+|---|---|
 | Stale Oracle Price | 2-hour staleness check; liquidation reserve ensures safety |
 | Flash Loan Attack | Epoch-based withdrawals; position locking |
 | Bad Debt Spiral | Junior position subordination; reputation penalties |
@@ -591,15 +731,15 @@ All external functions use OpenZeppelin's `ReentrancyGuard` to prevent reentranc
 - [ ] Economic simulation of edge cases
 - [ ] Long-term oracle reliability assessment
 
----
-
 ## Contract Specifications
 
 ### Solidity Version
+
 - **Target**: Solidity 0.8.33
 - **Compiler**: With optimizations enabled (200 runs)
 
 ### Dependencies
+
 - **OpenZeppelin Contracts**: 4.9+
 - **Chainlink Contracts**: Latest stable
 - **Foundry/Forge-std**: Latest
@@ -607,33 +747,34 @@ All external functions use OpenZeppelin's `ReentrancyGuard` to prevent reentranc
 ### Key Constants
 
 | Parameter | Value | Purpose |
-|-----------|-------|---------|
-| MAX_APR_BPS | 5000 (50%) | Upper limit on interest rates |
-| MAX_ACTIVE_POSITIONS | 100 | Maximum concurrent lender positions per market |
-| EPOCH_DURATION | 7 days | Withdrawal processing interval |
-| TIMELOCK_DURATION | 2 days | Arch controller change delay |
-| AUCTIO N_DURATION | 3 days | Liquidation auction window |
-| DUTCH_DECREMENT | 500 bps (5%) | Hourly price decrease |
+|---|---|---|
+| `MAX_APR_BPS` | 5000 (50%) | Upper limit on interest rates |
+| `MAX_ACTIVE_POSITIONS` | 100 | Maximum concurrent lender positions per market |
+| `EPOCH_DURATION` | 7 days | Withdrawal processing interval |
+| `TIMELOCK_DURATION` | 2 days | Arch controller change delay |
+| `AUCTION_DURATION` | 3 days | Liquidation auction window |
+| `DUTCH_DECREMENT` | 500 bps (5%) | Hourly price decrease |
 
 ### State Variables
 
 All state variables are carefully chosen to balance:
+
 - **Gas Efficiency**: Minimal storage operations
 - **Security**: Prevention of manipulation
 - **Transparency**: Full on-chain state visibility
 - **Upgradeability**: Design allows future improvements via new implementations
 
----
-
 ## Development & Contribution
 
 ### Code Style
+
 - Follow Solidity style guide (4-space indents)
 - Use descriptive variable names
 - Add NatSpec comments for public functions
 - Organize functions: external, public, internal, private
 
 ### Testing Requirements
+
 - Minimum 90% code coverage
 - All state changes tested
 - Edge cases documented
@@ -642,31 +783,28 @@ All state variables are carefully chosen to balance:
 ### Common Development Tasks
 
 **Formatting:**
+
 ```bash
 forge fmt
 ```
 
 **Linting:**
+
 ```bash
 solhint 'src/**/*.sol'
 ```
 
 **Gas Optimization:**
+
 ```bash
 forge build --optimize --optimizer-runs 200
 ```
 
----
-
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-### Disclaimer
-
-This code is provided as-is for educational and research purposes. Users assume full responsibility for any use of this code. The authors make no warranties regarding the security, correctness, or suitability of this code for any particular purpose. Always conduct thorough testing and security audits before deploying smart contracts to live networks.
-
----
+This project is licensed under the MIT License — see the [LICENSE](./LICENSE) file for details.
 
 ## Additional Resources
 
@@ -676,15 +814,12 @@ This code is provided as-is for educational and research purposes. Users assume 
 - [ERC721 Standard](https://eips.ethereum.org/EIPS/eip-721)
 - [Solidity Documentation](https://docs.soliditylang.org/)
 
----
-
-**Authors**: Preet Singh  
-**Protocol Version**: 1.0  
-**Last Updated**: May 2026
-
----
-
 ## Support
 
 For questions, issues, or contributions, please open an issue on GitHub or reach out to the development team.
 
+---
+
+**Authors**: Preet Singh
+**Protocol Version**: 1.0
+**Last Updated**: June 2026
