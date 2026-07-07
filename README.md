@@ -385,53 +385,21 @@ RevvFi is currently live on the following networks. Addresses below reflect the 
 
 [![Network: Polygon](https://img.shields.io/badge/Network-Polygon-8247E5?logo=polygon&logoColor=white)](https://polygonscan.com/)
 
+> **PLACEHOLDER — not a real deployment.** RevvFi has **not** been deployed to Polygon mainnet yet. `script/DeployMainnet.s.sol` is ready to run (see [Deployment](#deployment) above), but no addresses exist until that script is actually broadcast. Do not send funds to or interact with any address under the assumption it's RevvFi on Polygon — always verify independently on Polygonscan first.
 
-RevvFi is live on Polygon mainnet. This is a production deployment using real assets — always verify addresses against Polygonscan before interacting with any contract.
- 
 | Network | Chain ID | RPC |
 |---|---|---|
-| Polygon | 137 | `https://polygon-rpc.com` |
- 
-**Protocol Contracts**
- 
-| Contract | Address | Explorer |
-|---|---|---|
-| ArchController | `0x29D187421416B260530034A662A79712d7f7c97b` | [View](https://polygonscan.com/address/0x29D187421416B260530034A662A79712d7f7c97b) |
-| Factory | `0xF51101c98bcDE6a9ccad65a7Df538f558Af907D4` | [View](https://polygonscan.com/address/0xF51101c98bcDE6a9ccad65a7Df538f558Af907D4) |
-| PositionNFT | `0xc685f0F5472304D73964bDf8980652F7d023c485` | [View](https://polygonscan.com/address/0xc685f0F5472304D73964bDf8980652F7d023c485) |
-| Liquidator | `0x6bf84c9aa29c28f70C9c5DbC837310DB8fEaDF7f` | [View](https://polygonscan.com/address/0x6bf84c9aa29c28f70C9c5DbC837310DB8fEaDF7f) |
-| ReputationRegistry | `0x3895D539D8E09aa6809274e0F881490b2fC25B3C` | [View](https://polygonscan.com/address/0x3895D539D8E09aa6809274e0F881490b2fC25B3C) |
- 
-**Implementation Contracts**
- 
-| Contract | Address | Explorer |
-|---|---|---|
-| Market Implementation | `0xaB72BDdD3aa47A23b1F4D821C8018826Eb505528` | [View](https://polygonscan.com/address/0xaB72BDdD3aa47A23b1F4D821C8018826Eb505528) |
-| Escrow Implementation | `0xA8d016492488F3116f5bB3f1E86009690C740E78` | [View](https://polygonscan.com/address/0xA8d016492488F3116f5bB3f1E86009690C740E78) |
-| OfferBook Implementation | `0xd5b86aA515d121197e29DE353c5BF11A4578bd5a` | [View](https://polygonscan.com/address/0xd5b86aA515d121197e29DE353c5BF11A4578bd5a) |
-| LiquidityQueue Implementation | `0x6247D163A0e1b2cfdD5ECAecbc6648D18192728e` | [View](https://polygonscan.com/address/0x6247D163A0e1b2cfdD5ECAecbc6648D18192728e) |
- 
-**Example Market**
- 
-| Contract | Address | Explorer |
-|---|---|---|
-| Market (WETH/USDC) | `0x7CDA02daB71dfC6340319cf64310e2BB463a3C82` | [View](https://polygonscan.com/address/0x7CDA02daB71dfC6340319cf64310e2BB463a3C82) |
- 
-**External Contracts** (native Polygon mainnet assets — not deployed by RevvFi)
- 
+| Polygon | 137 | set `POLYGON_RPC_URL` in `.env.mainnet` |
+
+**Known Polygon mainnet addresses used by the deploy script** (external, not deployed by RevvFi — see `DeployMainnet.s.sol` for the full list):
+
 | Contract | Address | Explorer |
 |---|---|---|
 | USDC (native) | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | [View](https://polygonscan.com/address/0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359) |
 | WETH | `0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619` | [View](https://polygonscan.com/address/0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619) |
-| Oracle (ETH/USD) | `0xF9680D99D6C9589e2a93a78A04A279e509205945` | [View](https://polygonscan.com/address/0xF9680D99D6C9589e2a93a78A04A279e509205945) |
- 
-**Roles**
- 
-| Role | Address |
-|---|---|
-| Admin (Deployer) | `0x6cCf36a79BE659b4caF703A07E043FC1b15a9e29` |
-| Fee Recipient | `0x6cCf36a79BE659b4caF703A07E043FC1b15a9e29` |
-| Borrower | `0xDFe588a31E4CC6da86f10d86275883ac70B2667E` |
+| Chainlink Oracle (ETH/USD) | `0xF9680D99D6C9589e2a93a78A04A279e509205945` | [View](https://polygonscan.com/address/0xF9680D99D6C9589e2a93a78A04A279e509205945) |
+
+Once a real deployment is broadcast, replace this section with the actual addresses from the script's console output / `broadcast/DeployMainnet.s.sol/137/run-latest.json`.
 
 ## How It Works
 
@@ -582,16 +550,17 @@ forge build
 
 ### Environment Setup
 
-Create a `.env` file in the root directory:
+Copy `.env.example` to `.env.testnet` (or `.env.mainnet`) and fill in the values — see that file for the full list of variables. The scripts read everything via `vm.envUint`/`vm.envAddress`/`vm.envOr`, not via forge's `--private-key` CLI flag, so `PRIVATE_KEY`/`BORROWER_PRIVATE_KEY` must be set in the sourced env file:
 
 ```bash
 # Network RPC endpoints
-SEPOLIA_RPC=https://sepolia.infura.io/v3/YOUR_KEY
-POLYGON_RPC=https://polygon-rpc.com
+SEPOLIA_RPC_URL=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
+POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY
 
-# Private keys for deployment
-DEPLOYER_PRIVATE_KEY=0x...
-ORACLE_SIGNER_PRIVATE_KEY=0x...
+# Deployer + borrower keys
+PRIVATE_KEY=0x...
+BORROWER_PRIVATE_KEY=0x...
+BORROWER=0x...
 ```
 
 ### Deployment
@@ -600,16 +569,17 @@ To deploy:
 
 ```bash
 # Load environment variables
-source .env
+source .env.testnet
 
-# Deploy to Sepolia testnet
-forge script script/DeployRevvFi.s.sol --rpc-url $SEPOLIA_RPC --private-key $DEPLOYER_PRIVATE_KEY --broadcast
+# Deploy to Sepolia testnet (dry-run first — omit --broadcast)
+forge script script/DeployRevvFi.s.sol:DeployTestnet --rpc-url $SEPOLIA_RPC_URL -vvvv
+forge script script/DeployRevvFi.s.sol:DeployTestnet --rpc-url $SEPOLIA_RPC_URL --broadcast --verify --etherscan-api-key $ETHERSCAN_API_KEY
 
-# Deploy to Polygon mainnet
-forge script script/DeployRevvFi.s.sol --rpc-url $POLYGON_RPC --private-key $DEPLOYER_PRIVATE_KEY --broadcast --verify
+# Deploy to Polygon mainnet (source .env.mainnet first)
+forge script script/DeployMainnet.s.sol:DeployMainnet --rpc-url $POLYGON_RPC_URL --broadcast --verify --etherscan-api-key $POLYGONSCAN_API_KEY
 ```
 
-> **Mainnet caution:** Polygon deployment above uses real funds and is irreversible once broadcast. Run the full test suite, double-check constructor arguments, and confirm the deployer wallet/private key before running this against `$POLYGON_RPC`. The `--verify` flag submits source code to Polygonscan so the contract is publicly verifiable.
+> **Mainnet caution:** Polygon deployment above uses real funds and is irreversible once broadcast. Always dry-run without `--broadcast` first, run the full test suite, double-check constructor arguments, and confirm the deployer/borrower wallets before running this against `$POLYGON_RPC_URL`. The `--verify` flag submits source code to Polygonscan so the contract is publicly verifiable.
 
 ## Testing
 

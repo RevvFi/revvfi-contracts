@@ -28,15 +28,14 @@ import "../test/mocks/MockOracle.sol";
  *   - Does NOT deploy markets — that is the borrower's job
  *
  * Borrower (BORROWER address / BORROWER_PRIVATE_KEY)
- *   - Whitelisted by the admin
- *   - Calls factory.deployMarket() and pays the deployment fee themselves
- *   - The market is permanently bound to their address
- *   - Only they can borrow, repay, and manage collateral
+ *   - Whitelisted by the admin, ready to call factory.deployMarket() whenever
+ *     you want to test that flow yourself
  *
- * Note: For localnet convenience, if BORROWER_PRIVATE_KEY is not set, the
- * deployer key is used as a fallback to sign the borrower's deployMarket()
- * transaction.  This is acceptable locally because Anvil accounts share the
- * same node and the factory still binds the market to the BORROWER address.
+ * Note: This script intentionally does NOT deploy any market - it only
+ * deploys infrastructure and funds test accounts, so every market you see in
+ * the app was created by you (or a script you ran), not pre-seeded. Deploy
+ * one from the frontend's "Create Market" flow, or call
+ * factory.deployMarket() directly, whenever you're ready.
  *
  * Usage:
  *   anvil                        # terminal 1 — keep running
@@ -64,6 +63,7 @@ contract DeployLocalnet is Script {
     MockERC20 public usdc;
     MockERC20 public weth;
     MockOracle public oracle;
+    MockOracle public oracleUsdcCollateral;
 
     address marketImpl;
     address escrowImpl;
@@ -99,10 +99,26 @@ contract DeployLocalnet is Script {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         weth = new MockERC20("Wrapped Ether", "WETH", 18);
         oracle = new MockOracle(8, INITIAL_ETH_PRICE);
+        // A single price oracle can only correctly represent ONE "collateral
+        // priced in borrow-asset units" direction (RevvFiCollateralEscrow has
+        // no separate per-asset USD price - see _getCollateralValueFromAmount).
+        // `oracle` above is calibrated as "1 WETH = 2000 (borrow asset units)",
+        // correct only when collateral=WETH. This second oracle is the
+        // reciprocal ("1 USDC = 0.0005 borrow asset units", price=50000 @ 8
+        // decimals), for markets with USDC as collateral instead. Deployed
+        // here - not as a one-off manual transaction - so it survives every
+        // `make up`/anvil restart instead of silently vanishing.
+        oracleUsdcCollateral = new MockOracle(8, 50000);
         console.log("  USDC   :", address(usdc));
         console.log("  WETH   :", address(weth));
+        // Label kept exactly as "Oracle :" (not renamed/reformatted) because
+        // scripts/deploy.sh greps this exact "^\s*Oracle\s*:" pattern to
+        // extract the address - a differently-worded label would silently
+        // break that extraction.
         console.log("  Oracle :", address(oracle));
         console.log("  Price  : $2,000 (mock, call oracle.setPrice() to change)");
+        console.log("  OracleUsdcCollateral :", address(oracleUsdcCollateral));
+        console.log("  Price  : 0.0005 (reciprocal, mock, for USDC-as-collateral markets)");
 
         // Step 2 — Implementation contracts (EIP-1167 clone templates)
         console.log("\n[ADMIN 2/7] Deploying implementation contracts...");
@@ -153,56 +169,40 @@ contract DeployLocalnet is Script {
         factory.registerWithArchController();
         console.log("  Done.");
 
-        // Step 7 — Mint test tokens to all relevant accounts
-        console.log("\n[ADMIN 7/7] Minting test tokens...");
-        usdc.mint(deployer, 1_000_000e6); // 1 M USDC  to admin
-        weth.mint(deployer, 1_000 ether);
-        usdc.mint(borrower, 100_000e6); // 100 K USDC to borrower
-        weth.mint(borrower, 100 ether);
-        console.log("  Deployer: 1,000,000 USDC + 1,000 WETH");
-        console.log("  Borrower: 100,000 USDC + 100 WETH");
+        // Step 7 — Mint test tokens to every default Anvil account, so
+        // whichever one you connect with in MetaMask already has funds to
+        // create markets, deposit collateral, or submit offers with -
+        // no separate seeding step required.
+        console.log("\n[ADMIN 7/7] Minting test tokens to all default Anvil accounts...");
+        address[10] memory anvilAccounts = [
+            deployer, // index 0
+            borrower, // index 1
+            0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC, // index 2
+            0x90F79bf6EB2c4f870365E785982E1f101E93b906, // index 3
+            0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65, // index 4
+            0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc, // index 5
+            0x976EA74026E726554dB657fA54763abd0C3a0aa9, // index 6
+            0x14dC79964da2C08b23698B3D3cc7Ca32193d9955, // index 7
+            0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f, // index 8
+            0xa0Ee7A142d267C1f36714E4a8F75612F20a79720 // index 9
+        ];
+        for (uint256 i = 0; i < anvilAccounts.length; i++) {
+            usdc.mint(anvilAccounts[i], 100_000e6); // 100,000 USDC
+            weth.mint(anvilAccounts[i], 100 ether); // 100 WETH
+        }
+        console.log("  Every default Anvil account (index 0-9): 100,000 USDC + 100 WETH");
 
         vm.stopBroadcast();
 
-        // =====================================================================
-        // PHASE 2 — BORROWER: deploy their own market and pay the deployment fee
-        //
-        // factory.deployMarket() has no onlyOwner or msg.sender check — it only
-        // validates that the `borrower` PARAMETER is a registered address.
-        // The market is permanently bound to `borrower` regardless of who signs.
-        //
-        // On localnet: borrowerKey falls back to deployerKey if not set in env,
-        // which is fine for local development.
-        // =====================================================================
+        // No market is deployed here on purpose - every account above is
+        // funded and Borrower is whitelisted, ready for you to call
+        // factory.deployMarket() (from the frontend's "Create Market" flow,
+        // or directly) with whatever pairing/parameters you want to test.
 
-        console.log("\n--- Phase 2: Borrower deploys market ---");
-
-        vm.startBroadcast(borrowerKey);
-
-        // The borrower calls deployMarket and pays the deployment fee.
-        // The fee is sent to `feeRecipient` (the deployer/admin in this setup).
-        // On localnet the ETH stays within the same Anvil node, so the deployer
-        // effectively pays themselves — net cost is just gas.
-        console.log("\n[BORROWER 1/1] Deploying WETH/USDC market...");
-        address marketAddr = factory.deployMarket{value: DEPLOYMENT_FEE}(
-            borrower, // market bound to this address — only they can borrow
-            address(usdc), // borrow asset  : mock USDC (6 dec)
-            address(weth), // collateral    : mock WETH (18 dec)
-            address(oracle), // mock ETH/USD oracle (initial price: $2,000)
-            18, // collateral decimals
-            6, // borrow asset decimals
-            MIN_COLLATERAL_RATIO,
-            LIQUIDATION_THRESHOLD
-        );
-        console.log("  Market deployed:", marketAddr);
-        console.log("  Market borrower:", borrower);
-
-        vm.stopBroadcast();
-
-        _printSummary(deployer, borrower, marketAddr);
+        _printSummary(deployer, borrower);
     }
 
-    function _printSummary(address deployer, address borrower, address marketAddr) internal view {
+    function _printSummary(address deployer, address borrower) internal view {
         console.log("\n==================================================");
         console.log("          LOCALNET DEPLOYMENT SUMMARY");
         console.log("==================================================");
@@ -212,13 +212,15 @@ contract DeployLocalnet is Script {
         console.log("  PositionNFT       :", address(positionNFT));
         console.log("  Liquidator        :", address(liquidator));
         console.log("  ReputationRegistry:", address(reputationRegistry));
-        console.log("\n--- Market (deployed by borrower) ---");
-        console.log("  Market (WETH/USDC):", marketAddr);
-        console.log("  Borrower          :", borrower);
+        console.log("\n--- No market deployed ---");
+        console.log("  Deploy one yourself via factory.deployMarket() or the");
+        console.log("  frontend's Create Market flow, with whatever borrower/");
+        console.log("  asset pairing/parameters you want to test.");
         console.log("\n--- Mock Contracts ---");
         console.log("  USDC  :", address(usdc));
         console.log("  WETH  :", address(weth));
-        console.log("  Oracle:", address(oracle));
+        console.log("  Oracle (WETH collateral):", address(oracle));
+        console.log("  Oracle (USDC collateral):", address(oracleUsdcCollateral));
         console.log("  (call oracle.setPrice(newPrice) to simulate price changes)");
         console.log("\n--- Implementations ---");
         console.log("  Market        :", marketImpl);
@@ -226,16 +228,15 @@ contract DeployLocalnet is Script {
         console.log("  OfferBook     :", offerBookImpl);
         console.log("  LiquidityQueue:", liquidityQueueImpl);
         console.log("\n--- Roles ---");
-        console.log("  Admin (deployer):", deployer);
-        console.log("  Borrower        :", borrower);
+        console.log("  Admin (deployer)     :", deployer);
+        console.log("  Borrower (whitelisted):", borrower);
         console.log("\n--- Parameters ---");
         console.log("  Deployment Fee       : 0.1 ETH");
-        console.log("  Min Collateral Ratio : 110%");
-        console.log("  Liquidation Threshold: 95%");
+        console.log("  Min Collateral Ratio : 110%  (suggested - your call at deployMarket() time)");
+        console.log("  Liquidation Threshold: 95%   (suggested - your call at deployMarket() time)");
         console.log("  Initial ETH Price    : $2,000 (mock)");
         console.log("\n--- Test Token Balances ---");
-        console.log("  Deployer: 1,000,000 USDC + 1,000 WETH");
-        console.log("  Borrower: 100,000 USDC + 100 WETH");
+        console.log("  Every default Anvil account (index 0-9): 100,000 USDC + 100 WETH");
         console.log("\nNote: No Etherscan verification needed for localnet.");
         console.log("==================================================");
     }

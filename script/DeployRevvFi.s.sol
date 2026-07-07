@@ -39,6 +39,9 @@ import "../test/mocks/MockOracle.sol";
  * ------
  * Approved borrow assets  : Standard ERC20, no fees, no hooks (USDC, DAI, USDT)
  * Approved collateral     : Standard ERC20, fixed supply           (WETH, WBTC)
+ * By default deploys freely-mintable mock USDC/WETH. Set USDC_ADDRESS/WETH_ADDRESS
+ * in .env to reuse existing Sepolia test tokens instead (no minting is attempted
+ * for a reused token — fund the deployer/borrower accounts manually in that case).
  *
  * Usage:
  *   source .env.testnet
@@ -65,8 +68,10 @@ contract DeployTestnet is Script {
     RevvFiLiquidator public liquidator;
     ReputationRegistry public reputationRegistry;
 
-    MockERC20 public usdc;
-    MockERC20 public weth;
+    address public usdc;
+    address public weth;
+    bool public usdcIsMock;
+    bool public wethIsMock;
 
     address marketImpl;
     address escrowImpl;
@@ -82,6 +87,12 @@ contract DeployTestnet is Script {
         // Oracle: override via env or default to Chainlink Sepolia ETH/USD
         address oracle = vm.envOr("ORACLE_ETH_USD", CHAINLINK_ETH_USD_SEPOLIA);
 
+        // Tokens: override via env, or default to deploying freely-mintable mocks
+        address usdcOverride = vm.envOr("USDC_ADDRESS", address(0));
+        address wethOverride = vm.envOr("WETH_ADDRESS", address(0));
+        usdcIsMock = usdcOverride == address(0);
+        wethIsMock = wethOverride == address(0);
+
         console.log("\n=== RevvFi Testnet (Sepolia) Deployment ===");
         console.log("Admin (deployer) :", deployer);
         console.log("Borrower         :", borrower);
@@ -94,12 +105,22 @@ contract DeployTestnet is Script {
 
         vm.startBroadcast(deployerKey);
 
-        // Step 1 — Mock tokens (freely mintable for testnet)
-        console.log("\n[ADMIN 1/7] Deploying mock USDC and WETH...");
-        usdc = new MockERC20("USD Coin", "USDC", 6);
-        weth = new MockERC20("Wrapped Ether", "WETH", 18);
-        console.log("  USDC  :", address(usdc));
-        console.log("  WETH  :", address(weth));
+        // Step 1 — Tokens (reuse existing, or deploy mocks)
+        console.log("\n[ADMIN 1/7] Setting up USDC and WETH...");
+        if (usdcIsMock) {
+            usdc = address(new MockERC20("USD Coin", "USDC", 6));
+            console.log("  USDC  (mock)    :", usdc);
+        } else {
+            usdc = usdcOverride;
+            console.log("  USDC  (existing):", usdc);
+        }
+        if (wethIsMock) {
+            weth = address(new MockERC20("Wrapped Ether", "WETH", 18));
+            console.log("  WETH  (mock)    :", weth);
+        } else {
+            weth = wethOverride;
+            console.log("  WETH  (existing):", weth);
+        }
         console.log("  Oracle:", oracle);
 
         // Step 2 — Implementation contracts (used as clone templates by the factory)
@@ -151,14 +172,24 @@ contract DeployTestnet is Script {
         factory.registerWithArchController();
         console.log("  Done.");
 
-        // Step 7 — Mint test tokens so the borrower and admin can interact
+        // Step 7 — Mint test tokens (mocks only)
         console.log("\n[ADMIN 7/7] Minting test tokens...");
-        usdc.mint(deployer, 500_000e6);
-        weth.mint(deployer, 500 ether);
-        usdc.mint(borrower, 100_000e6);
-        weth.mint(borrower, 100 ether);
-        console.log("  Deployer: 500,000 USDC + 500 WETH");
-        console.log("  Borrower: 100,000 USDC + 100 WETH");
+        if (usdcIsMock) {
+            MockERC20(usdc).mint(deployer, 500_000e6);
+            MockERC20(usdc).mint(borrower, 100_000e6);
+            console.log("  Deployer: +500,000 USDC");
+            console.log("  Borrower: +100,000 USDC");
+        } else {
+            console.log("  Skipped USDC mint (using existing token) - fund accounts manually.");
+        }
+        if (wethIsMock) {
+            MockERC20(weth).mint(deployer, 500 ether);
+            MockERC20(weth).mint(borrower, 100 ether);
+            console.log("  Deployer: +500 WETH");
+            console.log("  Borrower: +100 WETH");
+        } else {
+            console.log("  Skipped WETH mint (using existing token) - fund accounts manually.");
+        }
 
         vm.stopBroadcast();
 
@@ -191,8 +222,8 @@ contract DeployTestnet is Script {
         console.log("\n[BORROWER 1/1] Deploying WETH/USDC market...");
         address marketAddr = factory.deployMarket{value: DEPLOYMENT_FEE}(
             borrower, // the market is owned by this address, not msg.sender
-            address(usdc), // borrow asset
-            address(weth), // collateral asset
+            usdc, // borrow asset
+            weth, // collateral asset
             oracle,
             18, // WETH decimals
             6, // USDC decimals
@@ -220,9 +251,11 @@ contract DeployTestnet is Script {
         console.log("\n--- Market (deployed by borrower) ---");
         console.log("  Market (WETH/USDC):", marketAddr);
         console.log("  Borrower          :", borrower);
-        console.log("\n--- Mock Tokens ---");
-        console.log("  USDC  :", address(usdc));
-        console.log("  WETH  :", address(weth));
+        console.log("\n--- Tokens ---");
+        console.log("  USDC  :", usdc);
+        console.log("  USDC is mock:", usdcIsMock);
+        console.log("  WETH  :", weth);
+        console.log("  WETH is mock:", wethIsMock);
         console.log("  Oracle:", oracle);
         console.log("\n--- Implementations ---");
         console.log("  Market        :", marketImpl);
