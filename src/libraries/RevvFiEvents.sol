@@ -64,10 +64,11 @@ library RevvFiEvents {
     event OfferSubmitted(
         uint256 indexed offerId, address indexed lender, uint256 amount, uint256 apr, uint8 seniority, uint256 expiry
     );
-    event OfferCancelled(uint256 indexed offerId, address indexed lender);
+    event OfferCancelled(uint256 indexed offerId, address indexed lender, uint256 refundedAmount);
     event OfferFilled(uint256 indexed offerId, address indexed lender, uint256 amountFilled);
     event DrawdownExecutedOffer(address indexed borrower, uint256 totalAmount, uint256 weightedApr);
     event OfferModified(uint256 indexed offerId, uint256 newAmount, uint256 newApr, uint256 newDuration);
+    event OfferExpired(uint256 indexed offerId, address indexed lender, uint256 refundedAmount);
 
     // ========================================================================== //
     //                           PositionNFT Events                               //

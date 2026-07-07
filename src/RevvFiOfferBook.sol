@@ -307,17 +307,19 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
         Offer storage offer = offers[offerId];
         if (offer.lender != msg.sender || !offer.active) revert RevvFiErrors.UnauthorizedCaller();
 
+        uint256 refundedAmount = offer.remainingAmount;
+
         offer.active = false;
         _removeActive(offerId);
         totalLiquidity -= offer.remainingAmount;
 
         // Refund remaining amount to lender
-        if (offer.remainingAmount > 0) {
-            IERC20(borrowAsset).safeTransfer(msg.sender, offer.remainingAmount);
+        if (refundedAmount > 0) {
+            IERC20(borrowAsset).safeTransfer(msg.sender, refundedAmount);
             offer.remainingAmount = 0;
         }
 
-        emit RevvFiEvents.OfferCancelled(offerId, msg.sender);
+        emit RevvFiEvents.OfferCancelled(offerId, msg.sender, refundedAmount);
     }
 
     /**
@@ -385,16 +387,19 @@ contract RevvFiOfferBook is ReentrancyGuard, Initializable {
 
             if (offer.expiry <= block.timestamp) {
                 // Refund remaining amount to lender
-                if (offer.remainingAmount > 0) {
+                uint256 refundedAmount = offer.remainingAmount;
+                if (refundedAmount > 0) {
                     IERC20 token = IERC20(borrowAsset);
-                    token.safeTransfer(offer.lender, offer.remainingAmount);
-                    totalLiquidity -= offer.remainingAmount;
+                    token.safeTransfer(offer.lender, refundedAmount);
+                    totalLiquidity -= refundedAmount;
                     offer.remainingAmount = 0;
                 }
 
                 offer.active = false;
                 _removeActive(offerId);
                 cleaned++;
+
+                emit RevvFiEvents.OfferExpired(offerId, offer.lender, refundedAmount);
             } else {
                 i++;
             }
