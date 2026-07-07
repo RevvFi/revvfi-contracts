@@ -164,6 +164,14 @@ contract FullLoanLifecycleTest is Test {
         assertEq(usdc.balanceOf(borrower), BORROW_AMOUNT);
         assertEq(market.getTotalOwed(), BORROW_AMOUNT);
 
+        // Capture position IDs now, before repayFull() settles/burns them -
+        // RevvFiPositionNFT.getLenderPositions() stops returning a token ID
+        // once it's burned, so looking this up afterward (as this test used
+        // to) silently finds nothing and the claim loop below never runs.
+        RevvFiPositionNFT concretePositionNFT = RevvFiPositionNFT(address(positionNFT));
+        uint256[] memory lender1Positions = concretePositionNFT.getLenderPositions(lender1);
+        uint256[] memory lender2Positions = concretePositionNFT.getLenderPositions(lender2);
+
         uint256 weightedApr = 880;
 
         _warpAndAccrue(365 days);
@@ -182,28 +190,35 @@ contract FullLoanLifecycleTest is Test {
 
         assertEq(market.getTotalOwed(), 0);
 
-        RevvFiPositionNFT concretePositionNFT = RevvFiPositionNFT(address(positionNFT));
-
-        uint256[] memory lender1Positions = concretePositionNFT.getLenderPositions(lender1);
         for (uint256 i = 0; i < lender1Positions.length; i++) {
-            vm.prank(lender1);
+            // getPositionClaimable is a view - no prank needed for it; vm.prank
+            // only covers the next call, so it must go right before claimFunds.
             uint256 claimable = market.getPositionClaimable(lender1Positions[i]);
             if (claimable > 0) {
+                vm.prank(lender1);
                 market.claimFunds(lender1Positions[i]);
             }
         }
 
-        uint256[] memory lender2Positions = concretePositionNFT.getLenderPositions(lender2);
         for (uint256 i = 0; i < lender2Positions.length; i++) {
-            vm.prank(lender2);
             uint256 claimable = market.getPositionClaimable(lender2Positions[i]);
             if (claimable > 0) {
+                vm.prank(lender2);
                 market.claimFunds(lender2Positions[i]);
             }
         }
 
-        assertGt(usdc.balanceOf(lender1), 6000e6);
-        assertGt(usdc.balanceOf(lender2), 4000e6);
+        // Each lender must earn interest at THEIR OWN quoted rate, not a
+        // market-wide blended average - this is the core regression check.
+        // Lowest-APR-first matching fully consumes lender1's cheaper 8%
+        // offer (6000e6) before touching any of lender2's 10% offer, of
+        // which only 4000e6 (of the 6000e6 offered) is needed to reach
+        // BORROW_AMOUNT - the other 2000e6 stays unfilled in the OfferBook.
+        uint256 lender1ExpectedInterest = (6000e6 * APR_1 * 365 days) / (365 days * 10000); // 480e6 @ 8%
+        uint256 lender2ExpectedInterest = (4000e6 * APR_2 * 365 days) / (365 days * 10000); // 400e6 @ 10%
+        // Post-offer-submission balance was 20000e6 - 6000e6 = 14000e6 for both.
+        assertApproxEqAbs(usdc.balanceOf(lender1), 14000e6 + 6000e6 + lender1ExpectedInterest, 100);
+        assertApproxEqAbs(usdc.balanceOf(lender2), 14000e6 + 4000e6 + lender2ExpectedInterest, 100);
 
         uint256 reputation = reputationRegistry.getReputationScore(borrower);
         assertGt(reputation, 500);
@@ -279,6 +294,32 @@ contract FullLoanLifecycleTest is Test {
         assertEq(market.positionApr(lender1Positions[0]), 500);
         assertEq(market.positionApr(lender2Positions[0]), 800);
         assertEq(market.positionApr(lender3Positions[0]), 1000);
+
+        // Regression check for the shared-blended-index bug: each position
+        // must accrue independently at its OWN apr, not a market-wide
+        // average. Lowest-APR-first matching fully fills lender1 (3000e6 @
+        // 5%) and lender2 (3000e6 @ 8%) before touching lender3's 4000e6 @
+        // 10% offer, of which only 2000e6 is needed to reach the 8000e6
+        // borrow - so lender3's position principal is 2000e6, not 4000e6.
+        vm.warp(block.timestamp + 365 days);
+
+        uint256 lender1Value = market.getPositionValue(lender1Positions[0]);
+        uint256 lender2Value = market.getPositionValue(lender2Positions[0]);
+        uint256 lender3Value = market.getPositionValue(lender3Positions[0]);
+
+        // 3000e6 * 5% = 150e6 interest -> 3150e6
+        assertApproxEqAbs(lender1Value, 3150e6, 100);
+        // 3000e6 * 8% = 240e6 interest -> 3240e6
+        assertApproxEqAbs(lender2Value, 3240e6, 100);
+        // 2000e6 (only the filled portion) * 10% = 200e6 interest -> 2200e6
+        assertApproxEqAbs(lender3Value, 2200e6, 100);
+
+        // Critically, these three values must all be DIFFERENT from each
+        // other - if a future change reintroduces a shared blended index,
+        // all three would converge to the same value again.
+        assertTrue(lender1Value != lender2Value);
+        assertTrue(lender2Value != lender3Value);
+        assertTrue(lender1Value != lender3Value);
     }
 
     function test_CurrentCycleBorrowedAmountTracking() public {

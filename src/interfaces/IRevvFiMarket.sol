@@ -44,7 +44,6 @@ interface IRevvFiMarket {
     function isLiquidatable() external view returns (bool);
     function getMaxBorrowable() external view returns (uint256);
     function getTotalOwed() external view returns (uint256);
-    function getCurrentDebtIndex() external view returns (uint256);
     function getActivePositionsCount() external view returns (uint256);
     function getActivePositionsPaginated(uint256 start, uint256 limit) external view returns (uint256[] memory);
     function getPositionClaimable(uint256 positionId) external view returns (uint256);

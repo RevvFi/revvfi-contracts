@@ -48,13 +48,13 @@ library RevvFiEvents {
     event DrawdownExecuted(uint256 totalAmount, uint256 weightedApr, uint256[] positionIds);
     event MarketClosedEvent(address indexed borrower, uint256 timestamp);
     event PositionLiquidated(uint256 indexed positionId, address indexed liquidator, uint256 auctionId);
-    event InterestAccrued(address indexed borrower, uint256 interestAmount);
-    event LenderRepaid(address indexed lender, uint256 positionId, uint256 principal, uint256 interest);
+    event LenderRepaid(address indexed lender, uint256 indexed positionId, uint256 newPrincipal, uint256 claimableShare);
     event LenderWithdrawn(address indexed lender, uint256 positionId, uint256 amount);
     event ContractsSet();
     event LiquidationStartedMarket(address indexed borrower);
     event LiquidationEndedMarket(address indexed borrower);
     event PositionSettled(uint256 indexed positionId, uint256 principalAmount, uint256 interestAmount);
+    event PositionClaimed(uint256 indexed positionId, address indexed lender, uint256 amount);
     event GuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
 
     // ========================================================================== //
