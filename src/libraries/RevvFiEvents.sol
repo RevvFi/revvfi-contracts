@@ -35,6 +35,7 @@ library RevvFiEvents {
     event CollateralLiquidated(address indexed borrower, uint256 collateralAmount, uint256 debtAmount);
     event MinCollateralRatioUpdated(uint256 oldRatio, uint256 newRatio);
     event LiquidationThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
+    event StalePriceThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
     event OracleUpdated(address indexed collateralAsset, address oracle, uint8 decimals);
     event LiquidationStarted(address indexed borrower);
     event LiquidationEnded(address indexed borrower);

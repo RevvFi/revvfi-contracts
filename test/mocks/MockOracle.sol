@@ -50,11 +50,11 @@ contract MockOracle is IAggregatorV3Interface {
     }
 
     function setStale() external {
-        // Prevent underflow
-        if (block.timestamp < 3 hours) {
+        // Older than the escrow's default 24h stalePriceThreshold. Prevent underflow.
+        if (block.timestamp < 25 hours) {
             _updatedAt = 0;
         } else {
-            _updatedAt = block.timestamp - 3 hours;
+            _updatedAt = block.timestamp - 25 hours;
         }
     }
 

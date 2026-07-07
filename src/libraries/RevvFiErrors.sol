@@ -45,6 +45,7 @@ library RevvFiErrors {
     error OracleNotSet();
     error InvalidDecimals();
     error OraclePriceStale();
+    error InvalidStalePriceThreshold();
     error InvalidCollateralRatio();
     error AlreadyLiquidating();
     error CollateralTransferFailed();

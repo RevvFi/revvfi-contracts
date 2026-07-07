@@ -36,6 +36,7 @@ interface IRevvFiCollateralEscrow {
     function getMaxBorrowable(address borrower) external view returns (uint256);
     function minCollateralRatio() external view returns (uint256);
     function liquidationThreshold() external view returns (uint256);
+    function stalePriceThreshold() external view returns (uint256);
     function getCollateralValue(address borrower) external view returns (uint256 value, uint256 amount);
     function isLiquidationActive() external view returns (bool);
 
@@ -46,4 +47,5 @@ interface IRevvFiCollateralEscrow {
     // Configuration (only factory)
     function setMinCollateralRatio(uint256 newRatio) external;
     function setLiquidationThreshold(uint256 newThreshold) external;
+    function setStalePriceThreshold(uint256 newThreshold) external;
 }

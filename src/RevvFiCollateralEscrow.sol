@@ -34,8 +34,8 @@ contract RevvFiCollateralEscrow is ReentrancyGuard, Initializable, IRevvFiCollat
     /// @dev Default liquidation threshold (95%) used when not explicitly set
     uint256 private constant DEFAULT_LIQ_THRESHOLD = 9500;
 
-    /// @dev Maximum age of oracle price data before considering it stale (2 hours)
-    uint256 private constant STALE_PRICE = 2 hours;
+    /// @dev Default maximum age of oracle price data before considering it stale, used when not explicitly set
+    uint256 private constant DEFAULT_STALE_PRICE_THRESHOLD = 24 hours;
     /// @dev Factory contract that deployed this escrow (immutable reference)
     address public factory;
 
@@ -74,6 +74,9 @@ contract RevvFiCollateralEscrow is ReentrancyGuard, Initializable, IRevvFiCollat
 
     /// @dev Threshold below which a position can be liquidated (in basis points)
     uint256 public liquidationThreshold;
+
+    /// @dev Maximum age of this market's oracle price data before considering it stale
+    uint256 public stalePriceThreshold;
 
     /// @dev Flag indicating whether liquidation is currently in progress
     bool public liquidationActive;
@@ -154,6 +157,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard, Initializable, IRevvFiCollat
         borrowDecimals = _borrowDecimals;
         minCollateralRatio = DEFAULT_MIN_CR;
         liquidationThreshold = DEFAULT_LIQ_THRESHOLD;
+        stalePriceThreshold = DEFAULT_STALE_PRICE_THRESHOLD;
 
         collateralOracleDecimals = IAggregatorV3Interface(_collateralOracle).decimals();
     }
@@ -240,7 +244,7 @@ contract RevvFiCollateralEscrow is ReentrancyGuard, Initializable, IRevvFiCollat
      * @dev Reverts if:
      *      - Price is <= 0
      *      - Updated at timestamp is 0
-     *      - Price data is stale (> 30 days old, per STALE_PRICE constant)
+     *      - Price data is older than stalePriceThreshold (default 24h, configurable via setStalePriceThreshold())
      *      - Round data is inconsistent (answeredInRound < roundId)
      * @notice Restored to use real Chainlink oracle; use MockOracle.setLatestPrice() in tests
      */
@@ -248,7 +252,10 @@ contract RevvFiCollateralEscrow is ReentrancyGuard, Initializable, IRevvFiCollat
         (uint80 roundId, int256 price,, uint256 updatedAt, uint80 answeredInRound) =
             IAggregatorV3Interface(collateralOracle).latestRoundData();
 
-        if (price <= 0 || updatedAt == 0 || block.timestamp > updatedAt + STALE_PRICE || answeredInRound < roundId) {
+        if (
+            price <= 0 || updatedAt == 0 || block.timestamp > updatedAt + stalePriceThreshold
+                || answeredInRound < roundId
+        ) {
             revert RevvFiErrors.OraclePriceStale();
         }
 
@@ -418,5 +425,16 @@ contract RevvFiCollateralEscrow is ReentrancyGuard, Initializable, IRevvFiCollat
         if (newThreshold > minCollateralRatio) revert RevvFiErrors.InvalidCollateralRatio();
         emit RevvFiEvents.LiquidationThresholdUpdated(liquidationThreshold, newThreshold);
         liquidationThreshold = newThreshold;
+    }
+
+    /**
+     * @dev Updates this market's oracle staleness threshold
+     * @param newThreshold New maximum age (in seconds) before oracle price data is considered stale
+     * @notice Only callable by the factory contract
+     */
+    function setStalePriceThreshold(uint256 newThreshold) external onlyFactory {
+        if (newThreshold == 0 || newThreshold > 7 days) revert RevvFiErrors.InvalidStalePriceThreshold();
+        emit RevvFiEvents.StalePriceThresholdUpdated(stalePriceThreshold, newThreshold);
+        stalePriceThreshold = newThreshold;
     }
 }
