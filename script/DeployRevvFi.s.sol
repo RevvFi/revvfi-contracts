@@ -23,17 +23,17 @@ import "../test/mocks/MockOracle.sol";
  * Admin (deployer)
  *   - Deploys all infrastructure contracts
  *   - Owns Factory and ArchController
- *   - Whitelists borrower addresses via archController.registerBorrower()
- *   - Does NOT deploy markets — that is the borrower's responsibility
+ *   - Does NOT whitelist any borrower and does NOT deploy any market — both
+ *     happen later, live, through the frontend:
+ *       1. Any wallet submits a borrower access request (or the admin
+ *          registers one directly) from the app's Admin panel.
+ *       2. The registered borrower deploys their own market from the
+ *          Create Market page, paying the deployment fee themselves.
  *
  * Borrower (BORROWER in .env)
- *   - A separate wallet that has been whitelisted by the admin
- *   - Calls factory.deployMarket() and pays the deployment fee themselves
- *   - Owns the resulting market (only they can borrow, repay, deposit collateral)
- *
- * This script runs BOTH phases in one broadcast for initial testnet setup
- * convenience.  On mainnet, Step 7 (deployMarket) would be a separate
- * transaction signed by the borrower's own wallet.
+ *   - Only used by this script to mint mock test tokens to (Step 7) so the
+ *     address has something to test with once registered via the frontend.
+ *     Not registered as a borrower and does not sign anything here.
  *
  * TOKENS
  * ------
@@ -58,8 +58,6 @@ contract DeployTestnet is Script {
 
     // ─── Protocol parameters ──────────────────────────────────────────────────
     uint256 constant DEPLOYMENT_FEE = 0.01 ether; // lower fee for testnet
-    uint256 constant MIN_COLLATERAL_RATIO = 11000; // 110%
-    uint256 constant LIQUIDATION_THRESHOLD = 9500; //  95%
 
     // ─── Deployed contract state ──────────────────────────────────────────────
     RevvFiArchController public archController;
@@ -81,8 +79,9 @@ contract DeployTestnet is Script {
     function run() public {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerKey);
-        uint256 borrowerKey = vm.envUint("BORROWER_PRIVATE_KEY");
-        address borrower = vm.addr(borrowerKey);
+        // Only used to mint mock test tokens to (Step 7) — this script never
+        // signs anything as the borrower, so no private key is needed for it.
+        address borrower = vm.envAddress("BORROWER");
 
         // Oracle: override via env or default to Chainlink Sepolia ETH/USD
         address oracle = vm.envOr("ORACLE_ETH_USD", CHAINLINK_ETH_USD_SEPOLIA);
@@ -99,7 +98,7 @@ contract DeployTestnet is Script {
         console.log("Oracle           :", oracle);
 
         // =====================================================================
-        // PHASE 1 — ADMIN: deploy infrastructure and whitelist the borrower
+        // ADMIN: deploy protocol infrastructure
         // Signer: deployer (protocol admin)
         // =====================================================================
 
@@ -146,14 +145,14 @@ contract DeployTestnet is Script {
         );
         console.log("  Factory:", address(factory));
 
-        // Step 4 — ArchController + whitelist the borrower
-        // The admin registers approved borrowers here.
-        // Only registered borrowers can have a market deployed for them.
-        console.log("\n[ADMIN 4/7] Deploying ArchController and whitelisting borrower...");
+        // Step 4 — ArchController
+        // No borrower is whitelisted here — that happens later through the
+        // frontend (borrower access request + admin approval, or a direct
+        // admin registration), so the whole registration flow can be
+        // exercised live instead of pre-seeded by this script.
+        console.log("\n[ADMIN 4/7] Deploying ArchController...");
         archController = new RevvFiArchController();
-        archController.registerBorrower(borrower); // <-- admin whitelists the borrower
-        console.log("  ArchController     :", address(archController));
-        console.log("  Borrower whitelisted:", borrower);
+        console.log("  ArchController:", address(archController));
 
         // Step 5 — Core singleton contracts (shared across all markets)
         console.log("\n[ADMIN 5/7] Deploying core contracts...");
@@ -193,52 +192,13 @@ contract DeployTestnet is Script {
 
         vm.stopBroadcast();
 
-        // =====================================================================
-        // PHASE 2 — BORROWER: deploy their own market and pay the deployment fee
-        //
-        // In production this would be a SEPARATE transaction signed by the
-        // borrower's own wallet.  For testnet convenience we reuse the deployer
-        // key here, but the factory enforces borrower == BORROWER parameter, so
-        // the market is correctly tied to the borrower address regardless of who
-        // pays for deployment.
-        // =====================================================================
+        // Borrower registration and market deployment happen later, live,
+        // through the frontend — not here. See the class doc-comment above.
 
-        // If BORROWER_PRIVATE_KEY is not provided, the deployer calls on behalf
-        // of the borrower (valid because deployMarket has no msg.sender check).
-
-        console.log("\n--- Phase 2: Borrower deploys market ---");
-        if (borrowerKey == deployerKey) {
-            console.log("  Note: BORROWER_PRIVATE_KEY not set, deployer is paying");
-            console.log("        the deployment fee on borrower's behalf (testnet only).");
-        }
-
-        vm.startBroadcast(borrowerKey);
-
-        // The BORROWER calls factory.deployMarket() and pays the deployment fee.
-        // factory.deployMarket() has no onlyOwner or msg.sender check — it only
-        // verifies that the `borrower` parameter is a registered borrower address.
-        // The resulting market is bound to `borrower`; only that address can
-        // borrow, repay, and manage collateral.
-        console.log("\n[BORROWER 1/1] Deploying WETH/USDC market...");
-        address marketAddr = factory.deployMarket{value: DEPLOYMENT_FEE}(
-            borrower, // the market is owned by this address, not msg.sender
-            usdc, // borrow asset
-            weth, // collateral asset
-            oracle,
-            18, // WETH decimals
-            6, // USDC decimals
-            MIN_COLLATERAL_RATIO,
-            LIQUIDATION_THRESHOLD
-        );
-        console.log("  Market deployed:", marketAddr);
-        console.log("  Market borrower:", borrower);
-
-        vm.stopBroadcast();
-
-        _printSummary(deployer, borrower, oracle, marketAddr);
+        _printSummary(deployer, borrower, oracle);
     }
 
-    function _printSummary(address deployer, address borrower, address oracle, address marketAddr) internal view {
+    function _printSummary(address deployer, address borrower, address oracle) internal view {
         console.log("\n==================================================");
         console.log("      TESTNET (SEPOLIA) DEPLOYMENT SUMMARY");
         console.log("==================================================");
@@ -248,9 +208,9 @@ contract DeployTestnet is Script {
         console.log("  PositionNFT       :", address(positionNFT));
         console.log("  Liquidator        :", address(liquidator));
         console.log("  ReputationRegistry:", address(reputationRegistry));
-        console.log("\n--- Market (deployed by borrower) ---");
-        console.log("  Market (WETH/USDC):", marketAddr);
-        console.log("  Borrower          :", borrower);
+        console.log("\n--- Next steps (do these from the frontend) ---");
+        console.log("  1. Connect a wallet and submit/approve a borrower access request in Admin.");
+        console.log("  2. Deploy a market as that borrower from the Create Market page.");
         console.log("\n--- Tokens ---");
         console.log("  USDC  :", usdc);
         console.log("  USDC is mock:", usdcIsMock);
